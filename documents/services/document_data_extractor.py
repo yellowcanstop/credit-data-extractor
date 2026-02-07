@@ -1,0 +1,791 @@
+from decimal import Decimal, InvalidOperation
+import re
+from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+from pdf2image import convert_from_bytes
+import base64
+from openai import AzureOpenAI
+from thefuzz import fuzz
+import io
+from typing import Dict, List, TypeVar, Optional, Any
+from azure.ai.documentintelligence import DocumentIntelligenceClient
+from azure.ai.documentintelligence.models import AnalyzeResult, DocumentContentFormat
+from shared.confidence.confidence_utils import merge_confidence_values
+from shared.confidence.openai_confidence import evaluate_confidence as evaluate_confidence_openai
+from shared.confidence.document_intelligence_confidence import evaluate_confidence as evaluate_confidence_di
+from shared.confidence.confidence_result import ConfidenceResult, OVERALL_CONFIDENCE_KEY
+from reports.models.report import ReportType
+
+ResponseFormatT = TypeVar(
+    "ResponseFormatT"
+)
+
+ExtractionConfidenceResult = ConfidenceResult[ResponseFormatT | None]
+
+class DocumentDataExtractorOptions:
+    """Defines the configuration options for extracting data from a document using Azure OpenAI."""
+
+    def __init__(self, extraction_prompt: str, page_start: Optional[int], page_end: Optional[int], doc_intelligence_endpoint: str, openai_endpoint: str, deployment_name: str, max_tokens: int = 4096, temperature: float = 0.1, top_p: float = 0.1):
+        """Initializes a new instance of the DocumentDataExtractorOptions class.
+
+        :param extraction_prompt: The prompt to use for extracting data from the document, including the expected output format.
+        :param page_start: The starting page number of the document to extract data from.
+        :param page_end: The ending page number of the document to extract data from.
+        :param doc_intelligence_endpoint: The Azure Document Intelligence endpoint to use for the request.
+        :param openai_endpoint: The Azure OpenAI endpoint to use for the request.
+        :param deployment_name: The name of the model deployment to use for the request.
+        :param max_tokens: The maximum number of tokens to generate in the response. Default is 4096.
+        :param temperature: The sampling temperature for the model. Default is 0.1.
+        :param top_p: The nucleus sampling parameter for the model. Default is 0.1.
+        """
+
+        self.system_prompt = f"""You are an AI assistant that extracts data from documents."""
+        self.extraction_prompt = extraction_prompt
+        self.page_start = page_start
+        self.page_end = page_end
+        self.openai_endpoint = openai_endpoint
+        self.doc_intelligence_endpoint = doc_intelligence_endpoint
+        self.deployment_name = deployment_name
+        self.max_tokens = max_tokens
+        self.temperature = temperature
+        self.top_p = top_p
+
+
+class DocumentDataExtractor:
+    """Defines a class for extracting structured data from a document using Azure OpenAI GPT models that support image inputs."""
+
+    def __init__(self, credential: DefaultAzureCredential):
+        """Initializes a new instance of the DocumentDataExtractor class.
+
+        :param credential: The Azure credential to use for authenticating with the Azure OpenAI service.
+        """
+
+        self.credential = credential
+        self.result: AnalyzeResult = None
+        self.report_type: ReportType = None
+
+    def from_bytes(self, document_bytes: bytes, response_format: type[ResponseFormatT], options: DocumentDataExtractorOptions) -> ExtractionConfidenceResult:
+        """Extracts structured data from the specified document bytes by converting the document to images and using an Azure OpenAI model to extract the data.
+
+        :param document_bytes: The byte array content of the document to extract data from.
+        :param options: The options for configuring the Azure OpenAI request for extracting data.
+        :return: The structured data extracted from the document as a dictionary.
+        """
+
+        client = self.__get_openai_client__(options)
+        di_client = self.__get_document_intelligence_client__(options)
+
+        if options.page_start and options.page_end:
+            page_range = f"{options.page_start}-{options.page_end}"
+        else:
+            page_range = None
+
+        # For a more accurate extraction, we can use the Document Intelligence service to extract the document layout and convert it to markdown.
+        if di_client:
+            poller = di_client.begin_analyze_document(
+                model_id="prebuilt-layout",
+                body=document_bytes,
+                pages=page_range,
+                output_content_format=DocumentContentFormat.MARKDOWN,
+                content_type="application/pdf"
+            )
+            self.result: AnalyzeResult = poller.result()
+            document_markdown = self.result.content
+        else:
+            document_markdown = None
+
+        image_uris = self.__get_document_image_uris__(
+            document_bytes, options.page_start, options.page_end)
+
+        user_content = []
+        user_content.append({
+            "type": "text",
+            "text": options.extraction_prompt
+        })
+
+        if document_markdown:
+            user_content.append({
+                "type": "text",
+                "text": document_markdown
+            })
+
+        for image_uri in image_uris:
+            user_content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": image_uri
+                }
+            })
+
+        completion = client.beta.chat.completions.parse(
+            model=options.deployment_name,
+            messages=[
+                {
+                    "role": "system",
+                    "content": options.system_prompt,
+                },
+                {
+                    "role": "user",
+                    "content": user_content
+                }
+            ],
+            response_format=response_format,
+            max_tokens=options.max_tokens,
+            temperature=options.temperature,
+            top_p=options.top_p,
+            # Enabled to determine the confidence of the response.
+            logprobs=True
+        )
+
+        response_obj = completion.choices[0].message.parsed
+        response_obj_dict = response_obj.model_dump()
+
+        confidence_openai = evaluate_confidence_openai(
+            extract_result=response_obj_dict,
+            choice=completion.choices[0]
+        )
+
+        if di_client:
+            confidence_di = evaluate_confidence_di(
+                extract_result=response_obj_dict,
+                analyze_result=self.result
+            )
+            confidence = merge_confidence_values(
+                confidence_a=confidence_di,
+                confidence_b=confidence_openai
+            )
+        else:
+            confidence = confidence_openai
+
+        return ExtractionConfidenceResult(
+            data=response_obj,
+            confidence_scores=confidence,
+            overall_confidence=confidence[OVERALL_CONFIDENCE_KEY]
+        )
+    
+    def extract_using_doc_intelligence(self, document_bytes: bytes, options: DocumentDataExtractorOptions): 
+        di_client = self.__get_document_intelligence_client__(options)
+
+        if options.page_start and options.page_end:
+            page_range = f"{options.page_start}-{options.page_end}"
+        else:
+            page_range = None
+        
+        poller = di_client.begin_analyze_document(
+            model_id="prebuilt-layout",
+            body=document_bytes,
+            pages=page_range,
+            output_content_format=DocumentContentFormat.MARKDOWN,
+            content_type="application/pdf"
+        )
+        self.result: AnalyzeResult = poller.result()
+        
+        tagged_tables = self.__identify_tables_from_json__()
+        extracted_data = self.__extract_from_tagged_tables__(tagged_tables)
+        self.__parse_extracted_data__(extracted_data)
+        # for the optional tables (ccris for company, no financials for partnership), validate if all present relevant tables are accounted for by checking against markdown. if not, send image to openai
+        # if doc intelligence low confidence, send to openai
+        # if openai is low confidence, escalate to human review
+        
+        return {
+            'extracted_data': extracted_data,
+            'tagged_tables': tagged_tables
+        }
+        
+    def __identify_tables_from_json__(self) -> List[Dict]:
+        """Identify relevant tables."""
+        
+        tagged_tables = []
+        
+        if not self.result.tables:
+            return tagged_tables
+        
+        paragraphs = self.result.paragraphs or []
+        
+        for table_idx, table in enumerate(self.result.tables):
+            table_region = table.bounding_regions[0] if table.bounding_regions else None
+            
+            # Find preceding paragraph to use as context
+            preceding_text = self.__find_missing_header__(table_region, paragraphs)
+            
+            # Determine table type from headers or context
+            idx_and_type = self.__determine_table_type__(table, preceding_text, table_idx)
+
+            if len(idx_and_type) == 1:
+                if idx_and_type[0]['type'] != 'UNKNOWN':
+                    lookup_table = self.__convert_to_row_map__(table)   
+                    tagged_tables.append({
+                        'type': idx_and_type[0]['type'],
+                        'table': lookup_table
+                    })
+            elif len(idx_and_type) > 1:
+                # multi-page CCRIS Details tables identified
+                for item in idx_and_type:
+                    lookup_table = self.__convert_to_row_map__(self.result.tables[item['idx']]) 
+                    tagged_tables.append({
+                        'type': item['type'],
+                        'table': lookup_table
+                    })
+        
+        return tagged_tables
+
+    def __find_missing_header__(self, table_region, paragraphs) -> Optional[str]:
+        """Finds the paragraph immediately before a table using bounding regions."""
+        if not table_region or not paragraphs:
+            return None
+        
+        table_page = table_region.page_number
+        table_top = table_region.polygon[1]  # Y-coordinate of top-left
+        
+        # Find paragraphs on same page that end before table starts
+        candidates = []
+        for para in paragraphs:
+            if not para.bounding_regions:
+                continue
+            
+            para_region = para.bounding_regions[0]
+            if para_region.page_number == table_page:
+                para_bottom = para_region.polygon[5]  # Y-coordinate of bottom-left
+                # If the paragraph is within 0.5 inches above the table
+                if 0 < (table_top - para_bottom) < 0.5: 
+                    candidates.append((para_bottom, para.content))
+        
+        # Return the closest preceding heading
+        if candidates:
+            candidates.sort(reverse=True)  # Closest first
+            return candidates[0][1]
+        
+        return None
+
+    def __is_fuzzy_match__(self, a: str, b: str, threshold: int = 85) -> bool:
+        """Checks if two strings are a fuzzy match above the given threshold."""
+        return fuzz.partial_ratio(a.strip().lower(), b.strip().lower()) > threshold
+    
+    def __determine_table_type__(self, table, preceding_text: Optional[str], table_idx: int) -> List[Dict]:
+        """Determines table type from headers or preceding context."""
+
+        # First try: Extract header cells
+        headers = []
+        for cell in table.cells:
+            # since headers may not be considered 'columnHeader' by SDK, we check first row
+            if cell.row_index == 0:
+                headers.append(cell.content.strip().lower())
+        header_text = ' '.join(headers)
+        
+        if self.report_type == ReportType.INDIVIDUAL:
+
+            if self.__is_fuzzy_match__(header_text, 'credit info at a glance') or self.__is_fuzzy_match__(header_text, 'credit info') or self.__is_fuzzy_match__(header_text, 'bankruptcy proceedings record'):
+                return [{'idx': table_idx, 'type': 'CREDIT_INFO_AT_A_GLANCE'}]
+            
+            if self.__is_fuzzy_match__(header_text, 'c1: banking payment records (source: ccris, bank negara malaysia)' or self.__is_fuzzy_match__(header_text, 'ccris entity key') or self.__is_fuzzy_match__(header_text, 'ccris summary') or self.__is_fuzzy_match__(header_text, 'credit applications') or self.__is_fuzzy_match__(header_text, 'approved in past 12 months') or self.__is_fuzzy_match__(header_text, 'summary of potential & current liabilities') or self.__is_fuzzy_match__(header_text, 'as borrower')):
+                return [{'idx': table_idx, 'type': 'CCRIS_SUMMARY'}]
+            
+            if self.__is_fuzzy_match__(header_text, 'ccris details)') or self.__is_fuzzy_match__(header_text, 'loan information') or self.__is_fuzzy_match__(header_text, 'outstanding credit') or (self.__is_fuzzy_match__(header_text, 'no') and table.column_count == 25):
+                return self.__handle_ccris_details_tables__(table_idx)
+            
+        elif self.report_type == ReportType.COMPANY:
+
+            if self.__is_fuzzy_match__(header_text, 'a: snapshot') or self.__is_fuzzy_match__(header_text, 'id verification') or self.__is_fuzzy_match__(header_text, 'company name (your input)'):
+                return [{'idx': table_idx, 'type': 'SNAPSHOT'}]
+            
+            if (self.__is_fuzzy_match__(header_text, 'financials and shareholders') or self.__is_fuzzy_match__(header_text, 'last updated')) and table.column_count == 2:
+                return [{'idx': table_idx, 'type': 'FINANCIALS_AND_SHAREHOLDERS'}]
+            
+            if self.__is_fuzzy_match__(header_text, 'credit info at a glance') or self.__is_fuzzy_match__(header_text, 'credit info') or self.__is_fuzzy_match__(header_text, 'winding up / bankruptcy proceedings record'):
+                return [{'idx': table_idx, 'type': 'CREDIT_INFO_AT_A_GLANCE'}]
+            
+            if (self.__is_fuzzy_match__(header_text, 'financial highlights') or self.__is_fuzzy_match__(header_text, 'financial year end') or self.__is_fuzzy_match__(header_text, 'date of tabling') or self.__is_fuzzy_match__(header_text, 'balance sheet') or self.__is_fuzzy_match__(header_text, 'non-current assets') or self.__is_fuzzy_match__(header_text, 'income statement') or self.__is_fuzzy_match__(header_text, 'revenue') or self.__is_fuzzy_match__(header_text, 'liquidity ratios') or self.__is_fuzzy_match__(header_text, 'current ratio')) and table.column_count == 6:
+                return [{'idx': table_idx, 'type': 'FINANCIAL_STATEMENTS'}]
+            
+            if self.__is_fuzzy_match__(header_text, 'c1: banking payment records (source: ccris, bank negara malaysia)' or self.__is_fuzzy_match__(header_text, 'ccris entity key') or self.__is_fuzzy_match__(header_text, 'ccris summary') or self.__is_fuzzy_match__(header_text, 'credit applications') or self.__is_fuzzy_match__(header_text, 'approved in past 12 months') or self.__is_fuzzy_match__(header_text, 'summary of potential & current liabilities') or self.__is_fuzzy_match__(header_text, 'as borrower')):
+                return [{'idx': table_idx, 'type': 'CCRIS_SUMMARY'}]
+            
+            if self.__is_fuzzy_match__(header_text, 'ccris details)') or self.__is_fuzzy_match__(header_text, 'loan information') or self.__is_fuzzy_match__(header_text, 'outstanding credit') or (self.__is_fuzzy_match__(header_text, 'no') and table.column_count == 25):
+                return self.__handle_ccris_details_tables__(table_idx)
+
+        # Second try: Use preceding paragraph
+        if preceding_text:
+            preceding_lower = preceding_text.strip().lower()
+
+            if self.report_type == ReportType.INDIVIDUAL:  
+
+                if self.__is_fuzzy_match__(preceding_lower, 'credit info at a glance') or self.__is_fuzzy_match__(preceding_lower, 'credit info') or self.__is_fuzzy_match__(preceding_lower, 'bankruptcy proceedings record'):
+                    return [{'idx': table_idx, 'type': 'CREDIT_INFO_AT_A_GLANCE'}]
+                
+                if self.__is_fuzzy_match__(preceding_lower, 'c1: banking payment records (source: ccris, bank negara malaysia)') or self.__is_fuzzy_match__(preceding_lower, 'ccris entity key') or self.__is_fuzzy_match__(preceding_lower, 'ccris summary') or self.__is_fuzzy_match__(preceding_lower, 'credit applications') or self.__is_fuzzy_match__(preceding_lower, 'approved in past 12 months') or self.__is_fuzzy_match__(preceding_lower, 'summary of potential & current liabilities') or self.__is_fuzzy_match__(preceding_lower, 'as borrower'):
+                    return [{'idx': table_idx, 'type': 'CCRIS_SUMMARY'}]
+                
+                if self.__is_fuzzy_match__(preceding_lower, 'ccris details)') or self.__is_fuzzy_match__(preceding_lower, 'loan information') or self.__is_fuzzy_match__(preceding_lower, 'outstanding credit') or (self.__is_fuzzy_match__(preceding_lower, 'no') and table.column_count == 25):
+                    return self.__handle_ccris_details_tables__(table_idx)
+                
+            elif self.report_type == ReportType.COMPANY:
+
+                if self.__is_fuzzy_match__(preceding_lower, 'a: snapshot') or self.__is_fuzzy_match__(preceding_lower, 'id verification') or self.__is_fuzzy_match__(preceding_lower, 'company name (your input)'):
+                    return [{'idx': table_idx, 'type': 'SNAPSHOT'}]
+                
+                if (self.__is_fuzzy_match__(preceding_lower, 'financials and shareholders') or self.__is_fuzzy_match__(preceding_lower, 'last updated')) and table.column_count == 2:
+                    return [{'idx': table_idx, 'type': 'FINANCIALS_AND_SHAREHOLDERS'}]
+                
+                if self.__is_fuzzy_match__(preceding_lower, 'credit info at a glance') or self.__is_fuzzy_match__(preceding_lower, 'credit info') or self.__is_fuzzy_match__(preceding_lower, 'winding up / bankruptcy proceedings record'):
+                    return [{'idx': table_idx, 'type': 'CREDIT_INFO_AT_A_GLANCE'}]
+                
+                if (self.__is_fuzzy_match__(preceding_lower, 'financial highlights') or self.__is_fuzzy_match__(preceding_lower, 'financial year end') or self.__is_fuzzy_match__(preceding_lower, 'date of tabling') or self.__is_fuzzy_match__(preceding_lower, 'balance sheet') or self.__is_fuzzy_match__(preceding_lower, 'non-current assets') or self.__is_fuzzy_match__(preceding_lower, 'income statement') or self.__is_fuzzy_match__(preceding_lower, 'revenue') or self.__is_fuzzy_match__(preceding_lower, 'liquidity ratios') or self.__is_fuzzy_match__(preceding_lower, 'current ratio')) and table.column_count == 6:
+                    return [{'idx': table_idx, 'type': 'FINANCIAL_STATEMENTS'}]
+                
+                if self.__is_fuzzy_match__(preceding_lower, 'c1: banking payment records (source: ccris, bank negara malaysia)') or self.__is_fuzzy_match__(preceding_lower, 'ccris entity key') or self.__is_fuzzy_match__(preceding_lower, 'ccris summary') or self.__is_fuzzy_match__(preceding_lower, 'credit applications') or self.__is_fuzzy_match__(preceding_lower, 'approved in past 12 months') or self.__is_fuzzy_match__(preceding_lower, 'summary of potential & current liabilities') or self.__is_fuzzy_match__(preceding_lower, 'as borrower'):
+                    return [{'idx': table_idx, 'type': 'CCRIS_SUMMARY'}]
+                
+                if self.__is_fuzzy_match__(preceding_lower, 'ccris details)') or self.__is_fuzzy_match__(preceding_lower, 'loan information') or self.__is_fuzzy_match__(preceding_lower, 'outstanding credit') or (self.__is_fuzzy_match__(preceding_lower, 'no') and table.column_count == 25):
+                    return self.__handle_ccris_details_tables__(table_idx)
+                
+        return [{'idx': table_idx, 'type': 'UNKNOWN'}]
+
+    def __convert_to_row_map__(table):
+        """Converts flat cells to nested dictionary with row_index as key and column_index as sub-key."""
+        row_map = {}
+        for cell in table.cells:
+            row_idx = cell.row_index
+            col_idx = cell.column_index
+            if row_idx not in row_map:
+                row_map[row_idx] = {}
+            row_map[row_idx][col_idx] = cell.content
+        return row_map
+   
+    def __handle_ccris_details_tables__(self, table_idx: int) -> List[Dict]:
+        """Handles multi-page CCRIS Details tables by tagging them appropriately."""
+        next_tables = self.__detect_ccris_details_tables__(table_idx)
+        table_types = []
+        if len(next_tables) == 0:
+            table_types.append({'idx': table_idx, 'type': 'CCRIS_DETAILS_SINGLE'})
+        elif len(next_tables) == 1:
+            table_types.append({'idx': table_idx, 'type': 'CCRIS_DETAILS_MULTI_START'})
+            table_types.append({'idx': next_tables[0], 'type': 'CCRIS_DETAILS_MULTI_END'})
+        else:
+            table_types.append({'idx': table_idx, 'type': 'CCRIS_DETAILS_MULTI_START'})
+            table_types.append({'idx': next_tables[-1], 'type': 'CCRIS_DETAILS_MULTI_END'})
+            for idx in range(1, len(next_tables) - 1):
+                table_types.append({'idx': next_tables[idx], 'type': 'CCRIS_DETAILS_MULTI_MID'})
+        return table_types
+
+    def __detect_ccris_details_tables__(self, table_idx: int) -> List[int]:
+        """Detect multi-page CCRIS Details tables."""
+        next_tables: List[int] = []
+        for idx in range(table_idx, len(self.result.tables) - 1):
+            current_table = self.result.tables[idx]
+            next_table = self.result.tables[idx + 1]
+
+            # Since CCRIS Details tables have a distinct column count compared to all other tables.
+            # We do not check for the boilerplate text between tables since regex approach breaks from OCR errors and fuzzy matching of long boilerplate is slow.
+            if current_table.column_count == next_table.column_count:
+                next_tables.append(idx + 1)
+            else:
+                break
+        return next_tables                
+
+    def __extract_from_tagged_tables__(self, tagged_tables: List[Dict]) -> Dict[str, List[Dict]]:
+        """Extracts data from tagged tables"""
+        extracted = {}
+        for tagged_table in tagged_tables:
+            if (self.report_type == ReportType.INDIVIDUAL):
+                values = self.__extract_from_table_individual__(tagged_table)
+            elif (self.report_type == ReportType.COMPANY):
+                values = self.__extract_from_table_company__(tagged_table)
+            extracted[tagged_table['type']].update(values)
+        return extracted
+
+    def __extract_from_table_individual__(self, tagged_table: Dict) -> Dict:
+        """Extracts data from a single tagged table for individual report based on its type."""
+        table_type = tagged_table['type']
+        table = tagged_table['table']
+        
+        extracted_values = {}
+        
+        if table_type == 'CREDIT_INFO_AT_A_GLANCE':
+            for r_idx in table:
+                row_key_text = table[r_idx].get(0, "").strip().lower()
+
+                # TODO check if bankruptcy necessary
+                if self.__is_fuzzy_match__(row_key_text, 'bankruptcy proceedings record'):
+                    extracted_values['bankruptcy'] = table[r_idx].get(2).strip()
+
+                if self.__is_fuzzy_match__(row_key_text, 'legal records in past 24 months (non-personal capacity)'):
+                    extracted_values['legal_non_personal'] = table[r_idx].get(2).strip()
+                elif self.__is_fuzzy_match__(row_key_text, 'legal records in past 24 months (personal capacity)'):
+                    extracted_values['legal_personal'] = table[r_idx].get(2).strip()
+
+                if self.__is_fuzzy_match__(row_key_text, 'special attention accounts'):
+                    extracted_values['special_attention_accounts_0'] = table[r_idx].get(2).strip()
+                  
+        elif table_type == 'CCRIS_SUMMARY':
+            ccris_summary = self.__extract_from_ccris_summary__(table)
+            extracted_values.update(ccris_summary)
+        
+        elif table_type == 'CCRIS_DETAILS_SINGLE':
+            ccris_details = self.__extract_from_ccris_details_single__(table)
+            extracted_values.update(ccris_details)
+
+        elif table_type == 'CCRIS_DETAILS_MULTI_START':
+            ccris_details = self.__extract_from_ccris_details_multi_start__(table)
+            extracted_values.update(ccris_details)
+        
+        elif table_type == 'CCRIS_DETAILS_MULTI_MID':
+            ccris_details = self.__extract_from_ccris_details_multi_mid__(table)
+            extracted_values.update(ccris_details)
+
+        elif table_type == 'CCRIS_DETAILS_MULTI_END':
+            ccris_details = self.__extract_from_ccris_details_multi_end__(table)
+            extracted_values.update(ccris_details)
+             
+        return extracted_values
+
+    def __extract_from_ccris_summary__(self, table) -> Dict:
+        """Extracts data from CCRIS Summary table."""
+        extracted_values = {}
+        for r_idx in table:
+            row_key_text = table[r_idx].get(0, "").strip().lower()
+            if self.__is_fuzzy_match__(row_key_text, 'as borrower'):
+                extracted_values['total_outstanding_balance_0'] = table[r_idx].get(1).strip()
+                extracted_values['total_limit_0'] = table[r_idx].get(2).strip()
+            
+            if self.__is_fuzzy_match__(row_key_text, 'special attention account'):
+                extracted_values['special_attention_accounts_1'] = table[r_idx].get(1).strip()
+        return extracted_values 
+    
+    def __extract_from_ccris_details_single__(self, table) -> Dict:
+        """Extracts data from CCRIS Details Single table."""
+        extracted_values = {}
+        end_row_idx = -1
+        start_row_idx = -1
+        for r_idx in table:
+            row_key_text = table[r_idx].get(5, "").strip().lower()
+            if self.__is_fuzzy_match__(row_key_text, 'total outstanding balance'):
+                extracted_values['total_outstanding_balance_1'] = table[r_idx].get(6).strip()
+                extracted_values['total_limit_1'] = table[r_idx].get(8).strip()
+                end_row_idx = r_idx
+
+        for r_idx in table:
+            header_text = table[r_idx].get(0, "").strip().lower()
+            if self.__is_fuzzy_match__(header_text, 'outstanding credit'):
+                start_row_idx = r_idx + 1
+
+        if (start_row_idx != -1 and end_row_idx != -1):
+            conduct_values = self.__extract_conduct__(table, start_row_idx, end_row_idx)
+            extracted_values['ccris_conduct'] = conduct_values
+        return extracted_values
+
+    def __extract_from_ccris_details_multi_start__(self, table) -> Dict:
+        """Extracts data from CCRIS Details Multi Start table."""
+        extracted_values = {}
+        start_row_idx = -1
+        for r_idx in table:
+            header_text = table[r_idx].get(0, "").strip().lower()
+            if self.__is_fuzzy_match__(header_text, 'outstanding credit'):
+                start_row_idx = r_idx + 1
+
+        if (start_row_idx != -1):
+            conduct_values = self.__extract_conduct__(table, start_row_idx, len(table))
+            extracted_values['ccris_conduct'] = conduct_values
+        return extracted_values
+    
+    def __extract_from_ccris_details_multi_mid__(self, table) -> Dict:
+        """Extracts data from CCRIS Details Multi Mid table."""
+        extracted_values = {}
+        conduct_values = self.__extract_conduct__(table, 0, len(table))
+        extracted_values['ccris_conduct'] = conduct_values
+        return extracted_values
+    
+    def __extract_from_ccris_details_multi_end__(self, table) -> Dict:
+        """Extracts data from CCRIS Details Multi End table."""
+        extracted_values = {}
+        end_row_idx = -1
+        for r_idx in table:
+            row_key_text = table[r_idx].get(5, "").strip().lower()
+            if self.__is_fuzzy_match__(row_key_text, 'total outstanding balance'):
+                extracted_values['total_outstanding_balance_1'] = table[r_idx].get(6).strip()
+                extracted_values['total_limit_1'] = table[r_idx].get(8).strip()
+                end_row_idx = r_idx
+
+        if (end_row_idx != -1):
+            conduct_values = self.__extract_conduct__(table, 0, end_row_idx)
+            extracted_values['ccris_conduct'] = conduct_values
+        return extracted_values
+    
+    def __extract_from_table_company__(self, tagged_table: Dict) -> Dict:
+        """Extracts data from a single tagged table for company report based on its type."""
+        table_type = tagged_table['type']
+        table = tagged_table['table']
+        
+        extracted_values = {}
+        
+        if table_type == 'CREDIT_INFO_AT_A_GLANCE':
+            for r_idx in table:
+                row_key_text = table[r_idx].get(0, "").strip().lower()
+                if self.__is_fuzzy_match__(row_key_text, 'winding up / bankruptcy proceedings record'):
+                    extracted_values['bankruptcy_entity'] = table[r_idx].get(2).strip()
+                    extracted_values['bankruptcy_rp'] = table[r_idx].get(3).strip()
+
+                if self.__is_fuzzy_match__(row_key_text, 'legal records in past 24 months (non-personal capacity)'):
+                    extracted_values['legal_non_personal_entity'] = table[r_idx].get(2).strip()
+                    extracted_values['legal_non_personal_rp'] = table[r_idx].get(3).strip()
+                elif self.__is_fuzzy_match__(row_key_text, 'legal records in past 24 months (personal capacity)'):
+                    extracted_values['legal_personal_entity'] = table[r_idx].get(2).strip()
+                    extracted_values['legal_personal_rp'] = table[r_idx].get(3).strip()
+                   
+                if self.__is_fuzzy_match__(row_key_text, 'special attention accounts'):
+                    extracted_values['special_attention_accounts_entity'] = table[r_idx].get(2).strip()
+                    extracted_values['special_attention_accounts_rp'] = table[r_idx].get(3).strip()
+                  
+        elif table_type == 'CCRIS_SUMMARY':
+            ccris_summary = self.__extract_from_ccris_summary__(table)
+            extracted_values.update(ccris_summary)
+        
+        elif table_type == 'CCRIS_DETAILS_SINGLE':
+            ccris_details = self.__extract_from_ccris_details_single__(table)
+            extracted_values.update(ccris_details)
+
+        elif table_type == 'CCRIS_DETAILS_MULTI_START':
+            ccris_details = self.__extract_from_ccris_details_multi_start__(table)
+            extracted_values.update(ccris_details)
+        
+        elif table_type == 'CCRIS_DETAILS_MULTI_MID':
+            ccris_details = self.__extract_from_ccris_details_multi_mid__(table)
+            extracted_values.update(ccris_details)
+
+        elif table_type == 'CCRIS_DETAILS_MULTI_END':
+            ccris_details = self.__extract_from_ccris_details_multi_end__(table)
+            extracted_values.update(ccris_details)
+       
+        elif table_type == 'SNAPSHOT':
+            for r_idx in table:
+                row_key_text = table[r_idx].get(0, "").strip().lower()
+                if self.__is_fuzzy_match__(row_key_text, 'registration date'):
+                    extracted_values['registration_date'] = table[r_idx].get(1).strip()
+                if self.__is_fuzzy_match__(row_key_text, 'type of company'):
+                    extracted_values['type_of_company'] = table[r_idx].get(1).strip()
+                if self.__is_fuzzy_match__(row_key_text, 'business sector'):
+                    extracted_values['business_sector'] = table[r_idx].get(1).strip()
+        
+        elif table_type == 'FINANCIALS_AND_SHAREHOLDERS':
+            for r_idx in table:
+                row_key_text = table[r_idx].get(0, "").strip().lower()
+                if self.__is_fuzzy_match__(row_key_text, 'revenue (rm)'):
+                    extracted_values['revenue_0'] = table[r_idx].get(1).strip()
+                if self.__is_fuzzy_match__(row_key_text, 'profit after tax (rm)'):
+                    extracted_values['profit_after_tax_0'] = table[r_idx].get(1).strip()
+                if self.__is_fuzzy_match__(row_key_text, 'total assets (rm)'):
+                    extracted_values['total_assets_0'] = table[r_idx].get(1).strip()
+                if self.__is_fuzzy_match__(row_key_text, 'paid up capital (rm)'):
+                    extracted_values['paid_up_capital'] = table[r_idx].get(1).strip()
+
+        elif table_type == 'FINANCIAL_STATEMENTS':
+            for r_idx in table:
+                row_key_text = table[r_idx].get(0, "").strip().lower()
+                if self.__is_fuzzy_match__(row_key_text, 'financial year end'):
+                    extracted_values['financial_year_end'] = table[r_idx].get(1).strip()
+                
+                if self.__is_fuzzy_match__(row_key_text, 'non-current assets'):
+                    extracted_values['non_current_assets'] = table[r_idx].get(1).strip()
+                    
+                elif self.__is_fuzzy_match__(row_key_text, 'current assets'):
+                    extracted_values['current_assets'] = table[r_idx].get(1).strip()
+                    
+                elif self.__is_fuzzy_match__(row_key_text, 'total assets'):
+                    extracted_values['total_assets_1'] = table[r_idx].get(1).strip()
+
+                if self.__is_fuzzy_match__(row_key_text, 'non-current liabilities'):
+                    extracted_values['non_current_liabilities'] = table[r_idx].get(1).strip()
+                elif self.__is_fuzzy_match__(row_key_text, 'current liabilities'):
+                    extracted_values['current_liabilities'] = table[r_idx].get(1).strip()
+                elif self.__is_fuzzy_match__(row_key_text, 'long term liabilities'):
+                    extracted_values['long_term_liabilities'] = table[r_idx].get(1).strip()
+                elif self.__is_fuzzy_match__(row_key_text, 'total liabilities'):
+                    extracted_values['total_liabilities'] = table[r_idx].get(1).strip()
+                     
+                if self.__is_fuzzy_match__(row_key_text, 'retained earning'):
+                    extracted_values['retained_earning'] = table[r_idx].get(1).strip()
+
+                if self.__is_fuzzy_match__(row_key_text, 'net worth (ta - tl)'):
+                    extracted_values['net_worth'] = table[r_idx].get(1).strip()
+                
+                if self.__is_fuzzy_match__(row_key_text, 'revenue'):
+                    extracted_values['revenue_1'] = table[r_idx].get(1).strip()
+
+                if self.__is_fuzzy_match__(row_key_text, 'profit / (loss) after tax'):
+                    extracted_values['profit_after_tax_1'] = table[r_idx].get(1).strip()
+
+                if self.__is_fuzzy_match__(row_key_text, 'current ratio'):
+                    extracted_values['current_ratio'] = table[r_idx].get(1).strip()
+
+                if self.__is_fuzzy_match__(row_key_text, 'gearing ratio'):
+                    extracted_values['gearing_ratio'] = table[r_idx].get(1).strip()
+
+                if self.__is_fuzzy_match__(row_key_text, 'debt to equity ratio [%]'):
+                    extracted_values['debt_to_equity_ratio'] = table[r_idx].get(1).strip()
+
+        return extracted_values
+
+    def __parse_extracted_data__(self, extracted_data: Dict):
+        """Parses and validates extracted data into final structured format."""
+        parsed_data = {}
+        if self.report_type == ReportType.INDIVIDUAL:
+            
+            if extracted_data.get('ccris_conduct'):
+                parsed_data['repayment_to_banks'] = self.__parse_conduct_values(extracted_data['ccris_conduct'])
+
+            # TODO compare with doc intelligence extraction (if available)
+            self.extract_using_image('ccris_detail')
+            
+            if extracted_data.get('total_outstanding_balance_0') and extracted_data.get('total_outstanding_balance_1') and extracted_data.get('total_limit_0') and extracted_data.get('total_limit_1'):
+                if extracted_data['total_outstanding_balance_0'] == extracted_data['total_outstanding_balance_1'] and extracted_data['total_limit_0'] == extracted_data['total_limit_1']:
+                    bal = self.__str_to_decimal__(extracted_data['total_outstanding_balance_0'])
+                    limit = self.__str_to_decimal__(extracted_data['total_limit_0'])
+                    if limit > 0:
+                        utilisation = bal / limit * 100
+                        parsed_data['utilisation'] = utilisation
+
+            if extracted_data.get('special_attention_accounts_0') and extracted_data.get('special_attention_accounts_1'):
+                # saa_0 is 'NO', saa_1 is 'N'
+                str = extracted_data['special_attention_accounts_0']
+                if str[0] == extracted_data['special_attention_accounts_1']:
+                    parsed_data['special_attention_accounts'] = extracted_data['special_attention_accounts_0']
+
+            if extracted_data.get('legal_non_personal') and extracted_data.get('legal_personal'):
+                if extracted_data['legal_non_personal'] == '0' and extracted_data['legal_personal'] == '0':
+                    defendant = self.__check_paragraph('d1: legal cases (subject as defendant)')
+                    plaintiff = self.__check_paragraph('d2: legal cases (subject as plaintiff)')
+                    if defendant and self.__is_fuzzy_match__(defendant, 'no information available' and plaintiff and self.__is_fuzzy_match__(plaintiff, 'no information available')):
+                        parsed_data['legal_cases'] = 0
+                else:
+                    np = int(extracted_data['legal_non_personal'])
+                    p = int(extracted_data['legal_personal'])
+                    parsed_data['legal_cases'] = np + p
+
+            # TODO check blacklist
+
+            # use ai as fallback. this needs to be async
+            if parsed_data.get('utilisation') is None:
+                self.extract_using_image('ccris_summary')
+                # update utilisation, special attention, legal
+
+            if (parsed_data.get('special_attention_accounts') is None) or (parsed_data.get('legal_cases') is None):
+                self.extract_using_image('credit_info_at_a_glance')
+            
+        elif self.report_type == ReportType.COMPANY:
+            
+            ccris = self.__check_paragraph('c1: banking payment records (source: ccris, bank negara malaysia)')
+            if ccris and self.__is_fuzzy_match__(ccris, 'a check with bank negara malaysia returned no result on subject'):
+                parsed_data['repayment_to_banks'] = 'N/A'
+                parsed_data['utilisation'] = 'N/A'
+            else:
+                if extracted_data.get('ccris_conduct'):
+                    parsed_data['repayment_to_banks'] = self.__parse_conduct_values(extracted_data['ccris_conduct'])
+
+                # TODO compare with doc intelligence extraction (if available)
+                self.extract_using_image('ccris_detail')
+
+                if extracted_data.get('total_outstanding_balance_0') and extracted_data.get('total_outstanding_balance_1') and extracted_data.get('total_limit_0') and extracted_data.get('total_limit_1'):
+                    if extracted_data['total_outstanding_balance_0'] == extracted_data['total_outstanding_balance_1'] and extracted_data['total_limit_0'] == extracted_data['total_limit_1']:
+                        bal = self.__str_to_decimal__(extracted_data['total_outstanding_balance_0'])
+                        limit = self.__str_to_decimal__(extracted_data['total_limit_0'])
+                        if limit > 0:
+                            utilisation = bal / limit * 100
+                            parsed_data['utilisation'] = utilisation
+
+            if extracted_data.get('special_attention_accounts_entity'):
+                parsed_data['special_attention_accounts'] = extracted_data['special_attention_accounts_entity']
+
+            
+    
+    def __str_to_decimal__(self, value: str) -> Decimal:
+        """Converts a string representation of a number to Decimal, handling commas and spaces."""
+        try:
+            clean_value = value.replace(',', '').replace(' ', '')
+            return Decimal(clean_value)
+        except (InvalidOperation, AttributeError):
+            return Decimal(0)
+        
+    def __parse_conduct_values(self, conduct_values: List[str]) -> str:
+        """Evaluate conduct of account based on conduct values extracted from CCRIS Details table."""
+        digits = 0
+        zeroes = 0
+        non_zeroes = 0
+        ones = 0
+        twos = 0
+        # TODO check ranges for credit scoring form
+        # This is assuming guarantor will never have >9 months lapses in payments...so must double check with gpt4o
+        threes_to_fives = 0
+        high_non_zeroes = 0
+        for string in conduct_values:
+            for char in string:
+                digits += 1
+                if char == '0':
+                    zeroes += 1
+                else:
+                    # check against char, not int(char) to avoid counting invalid characters (e.g. 'D', 'O') from OCR errors
+                    non_zeroes += 1
+                    if char == '1':
+                        ones += 1
+                    elif char == '2':
+                        twos += 1
+                    elif char in ['3', '4', '5']:
+                        threes_to_fives += 1
+                    elif char in ['6', '7', '8', '9']:
+                        high_non_zeroes += 1
+                    else:
+                        non_zeroes -= 1
+        if digits == zeroes or ((non_zeroes / digits) < 0.2 and non_zeroes == ones):
+            return 'Satisfactory'
+        elif (non_zeroes / digits) < 0.3 and non_zeroes == (ones + twos):
+            return 'Moderate'
+        else:
+            return 'Poor'
+
+    def __extract_conduct__(self, table, start_row_idx: int, end_row_idx: int) -> List[str]:
+        """Extracts conduct information from CCRIS Details table."""
+        conduct_values = []
+        for r_idx in range(start_row_idx, end_row_idx):
+            for c_idx in range(11, 23):
+                cell = table[r_idx].get(c_idx, "")
+                if cell:
+                    cell = re.sub(r'\s+', '', cell.strip()) # remove all whitespace
+                    conduct_values.append(cell)
+        return conduct_values
+
+    def __get_openai_client__(self, options: DocumentDataExtractorOptions) -> AzureOpenAI:
+        token_provider = get_bearer_token_provider(
+            self.credential, "https://cognitiveservices.azure.com/.default")
+
+        client = AzureOpenAI(
+            api_version="2024-12-01-preview",
+            azure_endpoint=options.openai_endpoint,
+            azure_ad_token_provider=token_provider)
+
+        return client
+
+    def __get_document_intelligence_client__(self, options: DocumentDataExtractorOptions) -> DocumentIntelligenceClient:
+        document_intelligence_client = DocumentIntelligenceClient(
+            endpoint=options.doc_intelligence_endpoint,
+            credential=self.credential
+        )
+
+        return document_intelligence_client
+
+    def __get_document_image_uris__(self, document_bytes: bytes, page_start: Optional[int], page_end: Optional[int]) -> list:
+        """Converts the specified document bytes to images using the pdf2image library and returns the image URIs.
+
+        To call this method, poppler-utils must be installed on the system.
+        """
+
+        pages = convert_from_bytes(document_bytes)
+
+        image_uris = []
+
+        if page_start and page_end:
+            pages = pages[page_start-1:page_end]
+
+        for page in pages:
+            byteIO = io.BytesIO()
+            page.save(byteIO, format='PNG')
+            base64_data = base64.b64encode(byteIO.getvalue()).decode('utf-8')
+            image_uris.append(f"data:image/png;base64,{base64_data}")
+
+        return image_uris
