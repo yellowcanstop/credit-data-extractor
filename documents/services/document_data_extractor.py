@@ -1,3 +1,4 @@
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 import re
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
@@ -182,7 +183,7 @@ class DocumentDataExtractor:
         tagged_tables = self.__identify_tables_from_json__()
         extracted_data = self.__extract_from_tagged_tables__(tagged_tables)
         self.__parse_extracted_data__(extracted_data)
-        # for the optional tables (ccris for company, no financials for partnership), validate if all present relevant tables are accounted for by checking against markdown. if not, send image to openai
+        # for the optional tables (ccris for company, no financials_and_shareholders and financial_statements for partnership), validate if all present relevant tables are accounted for by checking against markdown. if not, send image to openai
         # if doc intelligence low confidence, send to openai
         # if openai is low confidence, escalate to human review
         
@@ -519,6 +520,8 @@ class DocumentDataExtractor:
         if table_type == 'CREDIT_INFO_AT_A_GLANCE':
             for r_idx in table:
                 row_key_text = table[r_idx].get(0, "").strip().lower()
+
+                # TODO flag for human review
                 if self.__is_fuzzy_match__(row_key_text, 'winding up / bankruptcy proceedings record'):
                     extracted_values['bankruptcy_entity'] = table[r_idx].get(2).strip()
                     extracted_values['bankruptcy_rp'] = table[r_idx].get(3).strip()
@@ -560,9 +563,11 @@ class DocumentDataExtractor:
                 if self.__is_fuzzy_match__(row_key_text, 'registration date'):
                     extracted_values['registration_date'] = table[r_idx].get(1).strip()
                 if self.__is_fuzzy_match__(row_key_text, 'type of company'):
-                    extracted_values['type_of_company'] = table[r_idx].get(1).strip()
+                    str = table[r_idx].get(1).strip()
+                    extracted_values['type_of_company'] = " ".join(str.splitlines())
                 if self.__is_fuzzy_match__(row_key_text, 'business sector'):
-                    extracted_values['business_sector'] = table[r_idx].get(1).strip()
+                    str = table[r_idx].get(1).strip()
+                    extracted_values['business_sector'] = " ".join(str.splitlines())
         
         elif table_type == 'FINANCIALS_AND_SHAREHOLDERS':
             for r_idx in table:
@@ -571,8 +576,6 @@ class DocumentDataExtractor:
                     extracted_values['revenue_0'] = table[r_idx].get(1).strip()
                 if self.__is_fuzzy_match__(row_key_text, 'profit after tax (rm)'):
                     extracted_values['profit_after_tax_0'] = table[r_idx].get(1).strip()
-                if self.__is_fuzzy_match__(row_key_text, 'total assets (rm)'):
-                    extracted_values['total_assets_0'] = table[r_idx].get(1).strip()
                 if self.__is_fuzzy_match__(row_key_text, 'paid up capital (rm)'):
                     extracted_values['paid_up_capital'] = table[r_idx].get(1).strip()
 
@@ -589,7 +592,7 @@ class DocumentDataExtractor:
                     extracted_values['current_assets'] = table[r_idx].get(1).strip()
                     
                 elif self.__is_fuzzy_match__(row_key_text, 'total assets'):
-                    extracted_values['total_assets_1'] = table[r_idx].get(1).strip()
+                    extracted_values['total_assets'] = table[r_idx].get(1).strip()
 
                 if self.__is_fuzzy_match__(row_key_text, 'non-current liabilities'):
                     extracted_values['non_current_liabilities'] = table[r_idx].get(1).strip()
@@ -693,16 +696,118 @@ class DocumentDataExtractor:
             if extracted_data.get('special_attention_accounts_entity'):
                 parsed_data['special_attention_accounts'] = extracted_data['special_attention_accounts_entity']
 
+            if extracted_data.get('legal_non_personal_entity') and extracted_data.get('legal_personal_entity'):
+                if extracted_data['legal_non_personal_entity'] == '0' and extracted_data['legal_personal_entity'] == '0':
+                    defendant = self.__check_paragraph('d1: legal cases (subject as defendant)')
+                    plaintiff = self.__check_paragraph('d2: legal cases (subject as plaintiff)')
+                    if defendant and self.__is_fuzzy_match__(defendant, 'no information available' and plaintiff and self.__is_fuzzy_match__(plaintiff, 'no information available')):
+                        parsed_data['legal_cases'] = 0
+                else:
+                    np = int(extracted_data['legal_non_personal_entity'])
+                    p = int(extracted_data['legal_personal_entity'])
+                    parsed_data['legal_cases'] = np + p
+
+            # TODO check blacklist
+
+            if extracted_data.get('registration_date'):
+                parsed_data['years_in_business'] = self.__calculate_years__(extracted_data['registration_date'])
+
+            if extracted_data.get('type_of_company'):
+                type = extracted_data['type_of_company']
+                if self.__is_fuzzy_match__(type, 'limited by shares private limited'):
+                    parsed_data['type_of_company'] = 'Sdn Bhd'
+                else: 
+                    parsed_data['type_of_company'] = 'Non - Sdn Bhd'
             
+            if extracted_data.get('business_sector'):
+                parsed_data['nature_of_business'] = extracted_data['business_sector']
+
+            # n/a for non sdn bhd
+            if extracted_data.get('paid_up_capital'):
+                parsed_data['paid_up_capital'] = self.__str_to_decimal__(extracted_data['paid_up_capital'])
+        
+            if extracted_data.get('financial_year_end'):
+                parsed_data['financial_report_date'] = self.__reformat_date__(extracted_data['financial_year_end'])
+
+            if extracted_data.get('revenue_0') and extracted_data.get('revenue_1'):
+                if extracted_data['revenue_0'] == extracted_data['revenue_1']:
+                    parsed_data['turnover'] = self.__str_to_decimal__(extracted_data['revenue_0'])
+
+            if extracted_data.get('profit_after_tax_0') and extracted_data.get('profit_after_tax_1'):
+                if extracted_data['profit_after_tax_0'] == extracted_data['profit_after_tax_1']:
+                    parsed_data['net_profit'] = self.__str_to_decimal__(extracted_data['profit_after_tax_0'])
+
+            if extracted_data.get('retained_earning'):
+                parsed_data['retained_profit'] = self.__str_to_decimal__(extracted_data['retained_earning'])
+
+            if extracted_data.get('net_worth'):
+                parsed_data['net_worth'] = self.__str_to_decimal__(extracted_data['net_worth'])
+
+            if extracted_data.get('current_assets') and extracted_data.get('current_liabilities') and extracted_data.get('non_current_assets') and extracted_data.get('total_assets') and extracted_data.get('non_current_liabilities') and extracted_data.get('long_term_liabilities') and extracted_data.get('total_liabilities'):
+                nca = self.__str_to_decimal__(extracted_data['non_current_assets'])
+                ca = self.__str_to_decimal__(extracted_data['current_assets'])
+                ta = self.__str_to_decimal__(extracted_data['total_assets'])
+                ncl = self.__str_to_decimal__(extracted_data['non_current_liabilities'])
+                cl = self.__str_to_decimal__(extracted_data['current_liabilities'])
+                ltl = self.__str_to_decimal__(extracted_data['long_term_liabilities'])
+                tl = self.__str_to_decimal__(extracted_data['total_liabilities'])
+
+                valid_ca_cl = (ta == nca + ca) and (tl == ncl + cl + ltl)
+                if valid_ca_cl:
+                    parsed_data['net_current_assets'] = ca - cl
+                    if extracted_data.get('current_ratio'):
+                        extracted_cr = self.__str_to_decimal__(extracted_data['current_ratio'])
+                        cr = ca / cl if cl > 0 else Decimal(0)
+                        if abs(cr - extracted_cr) < Decimal('0.01'):
+                            parsed_data['current_ratio'] = extracted_cr
+
+            if extracted_data.get('gearing_ratio') and extracted_data.get('debt_to_equity_ratio') and extracted_data.get('net_worth') and extracted_data.get('total_liabilities'):
+                tl = self.__str_to_decimal__(extracted_data['total_liabilities'])
+                nw = self.__str_to_decimal__(extracted_data['net_worth'])
+                calculated_gr = tl / nw if nw > 0 else Decimal(0)
+                extracted_gr = self.__str_to_decimal__(extracted_data['gearing_ratio'])
+                extracted_der = self.__str_to_decimal__(extracted_data['debt_to_equity_ratio'])
+                valid_gr = (abs(extracted_gr - extracted_der) < Decimal('0.01')) and (abs(extracted_gr - calculated_gr) < Decimal('0.01'))
+                if valid_gr:
+                    parsed_data['gearing_ratio'] = extracted_gr
+
+        return parsed_data   
+
+    def __reformat_date__(self, date_str: str) -> str:
+        """Reformats date string DD-MM-YYYY to YYYY-MM-DD."""
+        try:
+            date = datetime.strptime(date_str, '%d-%m-%Y')
+            return date.strftime('%Y-%m-%d')
+        except ValueError:
+            return ""
     
+    def __calculate_years__(self, date_str: str) -> int:
+        """Calculates years since date string DD-MM-YYYY."""
+        try:
+            date = datetime.strptime(date_str, '%d-%m-%Y')
+            today = datetime.today()
+            years_elapsed = today.year - date.year - ((today.month, today.day) < (date.month, date.day))
+            return years_elapsed
+        except ValueError:
+            return 0
+        
     def __str_to_decimal__(self, value: str) -> Decimal:
         """Converts a string representation of a number to Decimal, handling commas and spaces."""
         try:
-            clean_value = value.replace(',', '').replace(' ', '')
-            return Decimal(clean_value)
+            clean_value = value.replace(',', '').replace(' ', '').replace('%', '')
+            if not clean_value:
+                return Decimal(0)
+            if clean_value.startswith('(') and clean_value.endswith(')'):
+                clean_value = '-' + clean_value[1:-1]
+
+            result = Decimal(clean_value)
+            
+            if '%' in value:
+                return result / 100
+            return result
         except (InvalidOperation, AttributeError):
             return Decimal(0)
-        
+    
     def __parse_conduct_values(self, conduct_values: List[str]) -> str:
         """Evaluate conduct of account based on conduct values extracted from CCRIS Details table."""
         digits = 0
