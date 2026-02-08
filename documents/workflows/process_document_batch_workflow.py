@@ -29,7 +29,6 @@ async def process_document_batch_http(req: func.HttpRequest, client):
     :param client: The Durable Orchestration Client to start the workflow.
     :return: The 202 Accepted response with a dictionary of orchestrator management URLs.
     """
-
     request_body = req.get_json()
     document_batch_request = DocumentBatchRequest.model_validate(request_body)
 

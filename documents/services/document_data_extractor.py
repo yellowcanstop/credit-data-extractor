@@ -423,7 +423,10 @@ class DocumentDataExtractor:
                 values = self.__extract_from_table_individual__(tagged_table)
             elif (self.report_type == ReportType.COMPANY):
                 values = self.__extract_from_table_company__(tagged_table)
-            extracted[tagged_table['type']].update(values)
+            table_type = tagged_table['type']
+            if table_type not in extracted:
+                extracted[table_type] = {}
+            extracted[table_type].update(values)
         return extracted
 
     def __extract_from_table_individual__(self, tagged_table: Dict) -> Dict:

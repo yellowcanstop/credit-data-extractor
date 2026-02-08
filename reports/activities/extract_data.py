@@ -49,7 +49,7 @@ def run(input: Request) -> Dict:
     - Dates should be in the format YYYY-MM-DD.""",
             page_start=input.page_range_start,
             page_end=input.page_range_end,
-            aiservices_endpoint=app_settings.azure_aiservices_endpoint,
+            doc_intelligence_endpoint=app_settings.azure_aiservices_endpoint,
             openai_endpoint=app_settings.azure_openai_endpoint,
             deployment_name=app_settings.azure_openai_chat_deployment,
             max_tokens=4096,
