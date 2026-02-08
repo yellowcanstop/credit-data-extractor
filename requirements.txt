@@ -2,15 +2,19 @@
 # Ref: aka.ms/functions-azure-monitor-python
 # azure-monitor-opentelemetry
 
-azure-functions
-azure-functions-durable
-azure-ai-documentintelligence
-openai
-pdf2image
-tiktoken
-tenacity
-azure-storage-blob
-azure-identity
-azure-appconfiguration
-azure-appconfiguration-provider
-thefuzz
+# DO NOT include azure-functions-worker in this file
+# The Python Worker is managed by Azure Functions platform
+# Manually managing azure-functions-worker may cause unexpected issues
+
+azure-functions~=1.21.3
+azure-functions-durable~=1.2.10
+azure-ai-documentintelligence~=1.0.1
+openai~=1.69.0
+pdf2image~=1.17.0
+tiktoken~=0.12.0
+tenacity~=9.1.2
+azure-storage-blob~=12.25.1
+azure-identity~=1.25.1
+azure-appconfiguration~=1.7.1
+azure-appconfiguration-provider~=2.1.0
+thefuzz~=0.22.1

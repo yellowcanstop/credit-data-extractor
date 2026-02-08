@@ -22,7 +22,7 @@ bp = df.Blueprint()
 @bp.function_name(http_trigger_name)
 @bp.route(route="process-documents", methods=["POST"])
 @bp.durable_client_input(client_name="client")
-async def process_document_batch_http(req: func.HttpRequest, client: df.DurableOrchestrationClient):
+async def process_document_batch_http(req: func.HttpRequest, client):
     """Starts a new instance of the ProcessDocumentBatchWorkflow orchestration in response to an HTTP request.
 
     :param req: The HTTP request trigger containing the document batch request in the body.
