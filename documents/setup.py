@@ -1,5 +1,5 @@
 import azure.durable_functions as df
-from documents.activities import get_document_folders, classify_document
+from documents.activities import get_document_folders
 from documents.workflows import process_document_batch_workflow, process_document_workflow
 
 

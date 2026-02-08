@@ -13,3 +13,4 @@ azure-storage-blob
 azure-identity
 azure-appconfiguration
 azure-appconfiguration-provider
+thefuzz

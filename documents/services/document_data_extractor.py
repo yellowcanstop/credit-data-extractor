@@ -1,5 +1,6 @@
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+import enum
 import re
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from pdf2image import convert_from_bytes
@@ -14,7 +15,10 @@ from shared.confidence.confidence_utils import merge_confidence_values
 from shared.confidence.openai_confidence import evaluate_confidence as evaluate_confidence_openai
 from shared.confidence.document_intelligence_confidence import evaluate_confidence as evaluate_confidence_di
 from shared.confidence.confidence_result import ConfidenceResult, OVERALL_CONFIDENCE_KEY
-from reports.models.report import ReportType
+
+class ReportType(enum.Enum):
+    INDIVIDUAL = "INDIVIDUAL"
+    COMPANY = "COMPANY"
 
 ResponseFormatT = TypeVar(
     "ResponseFormatT"
