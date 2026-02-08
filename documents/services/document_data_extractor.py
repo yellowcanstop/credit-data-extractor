@@ -181,12 +181,10 @@ class DocumentDataExtractor:
         )
         self.result: AnalyzeResult = poller.result()
         self.relevant_paras.update(self.__find_paragraphs__())
-        # TODO auto classify company or individual report based on snapshot table (new id, old id, date of birth)
+        self.report_type = self.__classify_report_type__()
         tagged_tables = self.__identify_tables_from_json__()
         extracted_data = self.__extract_from_tagged_tables__(tagged_tables)
         parsed_data = self.__parse_extracted_data__(extracted_data)
-        # for the optional tables (ccris for company, no financials_and_shareholders and financial_statements for partnership), validate if all present relevant tables are accounted for by checking against markdown. if not, send image to openai
-        # if doc intelligence low confidence, send to openai
         # if openai is low confidence, escalate to human review
         
         return parsed_data
@@ -359,7 +357,19 @@ class DocumentDataExtractor:
                 
         return [{'idx': table_idx, 'type': 'UNKNOWN'}]
 
-    def __convert_to_row_map__(table):
+    def __classify_report_type__(self) -> ReportType:
+        """Classifies the report type as individual or company based on presence of snapshot table."""
+        for table in self.result.tables:
+            keywords = []
+            for cell in table.cells:
+                if cell.column_index == 0:
+                    keywords.append(cell.content.strip().lower())
+            kw_text = ' '.join(keywords)
+            if self.__is_fuzzy_match__(kw_text, 'date of birth') or self.__is_fuzzy_match__(kw_text, 'nationality'):
+                return ReportType.INDIVIDUAL
+        return ReportType.COMPANY
+        
+    def __convert_to_row_map__(self, table):
         """Converts flat cells to nested dictionary with row_index as key and column_index as sub-key."""
         row_map = {}
         for cell in table.cells:
@@ -736,7 +746,7 @@ class DocumentDataExtractor:
 
             if (parsed_data.get('special_attention_accounts') is None) or (parsed_data.get('legal_cases') is None):
                 self.extract_using_image('credit_info_at_a_glance')
-                
+
             # TODO check blacklist
 
             if extracted_data.get('registration_date') is not None:
