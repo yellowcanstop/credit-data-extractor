@@ -769,7 +769,7 @@ class DocumentDataExtractor:
             
         elif self.report_type == ReportType.COMPANY:
             
-            if self.relevant_paras.get('ccris_not_available') is not None:
+            if self.relevant_paras.get('ccris_not_available') is not None and extracted_data.get('ccris_conduct') is None:
                 parsed_data['repayment_to_banks'] = 'N/A'
                 parsed_data['utilisation'] = 'N/A'
             else:
