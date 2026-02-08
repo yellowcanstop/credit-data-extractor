@@ -219,7 +219,8 @@ class DocumentDataExtractor:
 
         # TODO if openai is low confidence, escalate to human review
         
-        return parsed_data
+        # Convert Decimal values to float for JSON serialization
+        return {k: float(v) if isinstance(v, Decimal) else v for k, v in parsed_data.items()}
     
     def __find_paragraphs__(self) -> Dict[str, int]:
         """Locate relevant paragraphs since information is captured either as paragraphs or tables."""
