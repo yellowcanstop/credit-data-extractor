@@ -195,10 +195,10 @@ class DocumentDataExtractor:
             )
 
             self.result: AnalyzeResult = poller.result()
-            logger.debug("Document Intelligence returned %d tables, %d paragraphs", len(self.result.tables or []), len(self.result.paragraphs or []))
+            logger.info("Document Intelligence returned %d tables, %d paragraphs", len(self.result.tables or []), len(self.result.paragraphs or []))
 
             self.relevant_paras.update(self.__find_paragraphs__())
-            logger.debug("Identified relevant paragraphs: %s", self.relevant_paras)
+            logger.info("Identified relevant paragraphs: %s", self.relevant_paras)
 
             self.report_type = self.__classify_report_type__()
             logger.info("Classified report type as: %s", self.report_type.value)
@@ -207,10 +207,10 @@ class DocumentDataExtractor:
             logger.info("Tagged %d relevant tables for extraction", len(tagged_tables))
 
             extracted_data = self.__extract_from_tagged_tables__(tagged_tables)
-            logger.debug("Extracted data: %s", extracted_data)
+            logger.info("Extracted data: %s", extracted_data)
 
             parsed_data = self.__parse_extracted_data__(extracted_data)
-            logger.debug("Parsed extracted data: %s", parsed_data)
+            logger.info("Parsed extracted data: %s", parsed_data)
             logger.info("Completed extraction successfully")
 
         except Exception as e:
@@ -463,10 +463,8 @@ class DocumentDataExtractor:
                 values = self.__extract_from_table_individual__(tagged_table)
             elif (self.report_type == ReportType.COMPANY):
                 values = self.__extract_from_table_company__(tagged_table)
-            table_type = tagged_table['type']
-            if table_type not in extracted:
-                extracted[table_type] = {}
-            extracted[table_type].update(values)
+            
+            extracted.update(values)
         return extracted
 
     def __extract_from_table_individual__(self, tagged_table: Dict) -> Dict:
