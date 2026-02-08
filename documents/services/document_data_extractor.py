@@ -222,6 +222,16 @@ class DocumentDataExtractor:
         # Convert Decimal values to float for JSON serialization
         return {k: float(v) if isinstance(v, Decimal) else v for k, v in parsed_data.items()}
     
+    def __normalize_numeric_str__(self, value: str) -> str:
+        """Normalizes a numeric string to handle OCR errors where commas are misread as periods.
+        E.g., '2,091.202.00' -> '2091202.00', '2,091,202.00' -> '2091202.00'"""
+        stripped = value.replace(',', '')
+        parts = stripped.split('.')
+        if len(parts) <= 2:
+            return stripped
+        # Multiple periods: all but the last are OCR'd commas
+        return ''.join(parts[:-1]) + '.' + parts[-1]
+
     def __find_paragraphs__(self) -> Dict[str, int]:
         """Locate relevant paragraphs since information is captured either as paragraphs or tables."""
         relevant_paras = {}
@@ -724,9 +734,9 @@ class DocumentDataExtractor:
 
             util_keys = ['total_outstanding_balance_0', 'total_outstanding_balance_1', 'total_limit_0', 'total_limit_1']
             if all(extracted_data.get(key) is not None for key in util_keys):
-                if extracted_data['total_outstanding_balance_0'] == extracted_data['total_outstanding_balance_1'] and extracted_data['total_limit_0'] == extracted_data['total_limit_1']:
-                    bal = self.__str_to_decimal__(extracted_data['total_outstanding_balance_0'])
-                    limit = self.__str_to_decimal__(extracted_data['total_limit_0'])
+                if self.__normalize_numeric_str__(extracted_data['total_outstanding_balance_0']) == self.__normalize_numeric_str__(extracted_data['total_outstanding_balance_1']) and self.__normalize_numeric_str__(extracted_data['total_limit_0']) == self.__normalize_numeric_str__(extracted_data['total_limit_1']):
+                    bal = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['total_outstanding_balance_0']))
+                    limit = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['total_limit_0']))
                     if limit > 0:
                         utilisation = bal / limit * 100
                         parsed_data['utilisation'] = utilisation
@@ -771,9 +781,9 @@ class DocumentDataExtractor:
 
                 util_keys = ['total_outstanding_balance_0', 'total_outstanding_balance_1', 'total_limit_0', 'total_limit_1']
                 if all(extracted_data.get(key) is not None for key in util_keys):
-                    if extracted_data['total_outstanding_balance_0'] == extracted_data['total_outstanding_balance_1'] and extracted_data['total_limit_0'] == extracted_data['total_limit_1']:
-                        bal = self.__str_to_decimal__(extracted_data['total_outstanding_balance_0'])
-                        limit = self.__str_to_decimal__(extracted_data['total_limit_0'])
+                    if self.__normalize_numeric_str__(extracted_data['total_outstanding_balance_0']) == self.__normalize_numeric_str__(extracted_data['total_outstanding_balance_1']) and self.__normalize_numeric_str__(extracted_data['total_limit_0']) == self.__normalize_numeric_str__(extracted_data['total_limit_1']):
+                        bal = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['total_outstanding_balance_0']))
+                        limit = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['total_limit_0']))
                         if limit > 0:
                             utilisation = bal / limit * 100
                             parsed_data['utilisation'] = utilisation
@@ -831,13 +841,13 @@ class DocumentDataExtractor:
                     parsed_data['financial_report_date'] = self.__reformat_date__(extracted_data['financial_year_end'])
 
                 if extracted_data.get('revenue_0') is not None and extracted_data.get('revenue_1') is not None:
-                    if extracted_data['revenue_0'] == extracted_data['revenue_1']:
-                        parsed_data['turnover'] = self.__str_to_decimal__(extracted_data['revenue_0'])
-
+                    if self.__normalize_numeric_str__(extracted_data['revenue_0']) == self.__normalize_numeric_str__(extracted_data['revenue_1']):
+                        parsed_data['turnover'] = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['revenue_0']))
+                    
                 if extracted_data.get('profit_after_tax_0') is not None and extracted_data.get('profit_after_tax_1') is not None:
-                    if extracted_data['profit_after_tax_0'] == extracted_data['profit_after_tax_1']:
-                        parsed_data['net_profit'] = self.__str_to_decimal__(extracted_data['profit_after_tax_0'])
-
+                    if self.__normalize_numeric_str__(extracted_data['profit_after_tax_0']) == self.__normalize_numeric_str__(extracted_data['profit_after_tax_1']):
+                        parsed_data['net_profit'] = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['profit_after_tax_0']))
+                 
                 if extracted_data.get('retained_earning') is not None:
                     parsed_data['retained_profit'] = self.__str_to_decimal__(extracted_data['retained_earning'])
 
