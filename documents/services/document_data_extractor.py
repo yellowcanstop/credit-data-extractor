@@ -72,6 +72,14 @@ class DocumentDataExtractor:
         self.report_type: ReportType = None
         self.relevant_paras: Dict[str, int] = {}
 
+    def __safe_get_cell__(self, table, r_idx: int, c_idx: int) -> Optional[str]:
+        """Safely gets and strips a cell value from a table row, returning None if the cell doesn't exist."""
+        value = table[r_idx].get(c_idx)
+        if value is None:
+            logger.debug("Missing cell at row %d, col %d", r_idx, c_idx)
+            return None
+        return value.strip()
+
     def from_bytes(self, document_bytes: bytes, response_format: type[ResponseFormatT], options: DocumentDataExtractorOptions) -> ExtractionConfidenceResult:
         """Extracts structured data from the specified document bytes by converting the document to images and using an Azure OpenAI model to extract the data.
 
@@ -491,15 +499,23 @@ class DocumentDataExtractor:
 
                 # TODO check if bankruptcy necessary
                 if self.__is_fuzzy_match__(row_key_text, 'bankruptcy proceedings record'):
-                    extracted_values['bankruptcy'] = table[r_idx].get(2).strip()
+                    val = self.__safe_get_cell__(table, r_idx, 2)
+                    if val is not None:
+                        extracted_values['bankruptcy'] = val
 
                 if self.__is_fuzzy_match__(row_key_text, 'legal records in past 24 months (non-personal capacity)'):
-                    extracted_values['legal_non_personal'] = table[r_idx].get(2).strip()
+                    val = self.__safe_get_cell__(table, r_idx, 2)
+                    if val is not None:
+                        extracted_values['legal_non_personal'] = val
                 elif self.__is_fuzzy_match__(row_key_text, 'legal records in past 24 months (personal capacity)'):
-                    extracted_values['legal_personal'] = table[r_idx].get(2).strip()
+                    val = self.__safe_get_cell__(table, r_idx, 2)
+                    if val is not None:
+                        extracted_values['legal_personal'] = val
 
                 if self.__is_fuzzy_match__(row_key_text, 'special attention accounts'):
-                    extracted_values['special_attention_accounts_0'] = table[r_idx].get(2).strip()
+                    val = self.__safe_get_cell__(table, r_idx, 2)
+                    if val is not None:
+                        extracted_values['special_attention_accounts_0'] = val
                   
         elif table_type == 'CCRIS_SUMMARY':
             ccris_summary = self.__extract_from_ccris_summary__(table)
@@ -529,11 +545,17 @@ class DocumentDataExtractor:
         for r_idx in table:
             row_key_text = table[r_idx].get(0, "").strip().lower()
             if self.__is_fuzzy_match__(row_key_text, 'as borrower'):
-                extracted_values['total_outstanding_balance_0'] = table[r_idx].get(1).strip()
-                extracted_values['total_limit_0'] = table[r_idx].get(2).strip()
+                val1 = self.__safe_get_cell__(table, r_idx, 1)
+                val2 = self.__safe_get_cell__(table, r_idx, 2)
+                if val1 is not None:
+                    extracted_values['total_outstanding_balance_0'] = val1
+                if val2 is not None:
+                    extracted_values['total_limit_0'] = val2
             
             if self.__is_fuzzy_match__(row_key_text, 'special attention account'):
-                extracted_values['special_attention_accounts_1'] = table[r_idx].get(1).strip()
+                val = self.__safe_get_cell__(table, r_idx, 1)
+                if val is not None:
+                    extracted_values['special_attention_accounts_1'] = val
         return extracted_values 
     
     def __extract_from_ccris_details_single__(self, table) -> Dict:
@@ -544,8 +566,12 @@ class DocumentDataExtractor:
         for r_idx in table:
             row_key_text = table[r_idx].get(5, "").strip().lower()
             if self.__is_fuzzy_match__(row_key_text, 'total outstanding balance'):
-                extracted_values['total_outstanding_balance_1'] = table[r_idx].get(6).strip()
-                extracted_values['total_limit_1'] = table[r_idx].get(8).strip()
+                val6 = self.__safe_get_cell__(table, r_idx, 6)
+                val8 = self.__safe_get_cell__(table, r_idx, 8)
+                if val6 is not None:
+                    extracted_values['total_outstanding_balance_1'] = val6
+                if val8 is not None:
+                    extracted_values['total_limit_1'] = val8
                 end_row_idx = r_idx
 
         for r_idx in table:
@@ -586,8 +612,12 @@ class DocumentDataExtractor:
         for r_idx in table:
             row_key_text = table[r_idx].get(5, "").strip().lower()
             if self.__is_fuzzy_match__(row_key_text, 'total outstanding balance'):
-                extracted_values['total_outstanding_balance_1'] = table[r_idx].get(6).strip()
-                extracted_values['total_limit_1'] = table[r_idx].get(8).strip()
+                val6 = self.__safe_get_cell__(table, r_idx, 6)
+                val8 = self.__safe_get_cell__(table, r_idx, 8)
+                if val6 is not None:
+                    extracted_values['total_outstanding_balance_1'] = val6
+                if val8 is not None:
+                    extracted_values['total_limit_1'] = val8
                 end_row_idx = r_idx
 
         if (end_row_idx != -1):
@@ -608,19 +638,35 @@ class DocumentDataExtractor:
 
                 # TODO flag for human review
                 if self.__is_fuzzy_match__(row_key_text, 'winding up / bankruptcy proceedings record'):
-                    extracted_values['bankruptcy_entity'] = table[r_idx].get(2).strip()
-                    extracted_values['bankruptcy_rp'] = table[r_idx].get(3).strip()
+                    val2 = self.__safe_get_cell__(table, r_idx, 2)
+                    val3 = self.__safe_get_cell__(table, r_idx, 3)
+                    if val2 is not None:
+                        extracted_values['bankruptcy_entity'] = val2
+                    if val3 is not None:
+                        extracted_values['bankruptcy_rp'] = val3
 
                 if self.__is_fuzzy_match__(row_key_text, 'legal records in past 24 months (non-personal capacity)'):
-                    extracted_values['legal_non_personal_entity'] = table[r_idx].get(2).strip()
-                    extracted_values['legal_non_personal_rp'] = table[r_idx].get(3).strip()
+                    val2 = self.__safe_get_cell__(table, r_idx, 2)
+                    val3 = self.__safe_get_cell__(table, r_idx, 3)
+                    if val2 is not None:
+                        extracted_values['legal_non_personal_entity'] = val2
+                    if val3 is not None:
+                        extracted_values['legal_non_personal_rp'] = val3
                 elif self.__is_fuzzy_match__(row_key_text, 'legal records in past 24 months (personal capacity)'):
-                    extracted_values['legal_personal_entity'] = table[r_idx].get(2).strip()
-                    extracted_values['legal_personal_rp'] = table[r_idx].get(3).strip()
+                    val2 = self.__safe_get_cell__(table, r_idx, 2)
+                    val3 = self.__safe_get_cell__(table, r_idx, 3)
+                    if val2 is not None:
+                        extracted_values['legal_personal_entity'] = val2
+                    if val3 is not None:
+                        extracted_values['legal_personal_rp'] = val3
                    
                 if self.__is_fuzzy_match__(row_key_text, 'special attention accounts'):
-                    extracted_values['special_attention_accounts_entity'] = table[r_idx].get(2).strip()
-                    extracted_values['special_attention_accounts_rp'] = table[r_idx].get(3).strip()
+                    val2 = self.__safe_get_cell__(table, r_idx, 2)
+                    val3 = self.__safe_get_cell__(table, r_idx, 3)
+                    if val2 is not None:
+                        extracted_values['special_attention_accounts_entity'] = val2
+                    if val3 is not None:
+                        extracted_values['special_attention_accounts_rp'] = val3
                   
         elif table_type == 'CCRIS_SUMMARY':
             ccris_summary = self.__extract_from_ccris_summary__(table)
@@ -646,18 +692,23 @@ class DocumentDataExtractor:
             for r_idx in table:
                 row_key_text = table[r_idx].get(0, "").strip().lower()
                 if self.__is_fuzzy_match__(row_key_text, 'registration date'):
-                    extracted_values['registration_date'] = table[r_idx].get(1).strip()
+                    val = self.__safe_get_cell__(table, r_idx, 1)
+                    if val is not None:
+                        extracted_values['registration_date'] = val
 
                 if self.__is_fuzzy_match__(row_key_text, 'type of company'):
-                    str = table[r_idx].get(1).strip()
-                    extracted_values['type'] = " ".join(str.splitlines())
+                    val = self.__safe_get_cell__(table, r_idx, 1)
+                    if val is not None:
+                        extracted_values['type'] = " ".join(val.splitlines())
                 elif self.__is_fuzzy_match__(row_key_text, 'type'):
-                    str = table[r_idx].get(1).strip()
-                    extracted_values['type'] = " ".join(str.splitlines())
+                    val = self.__safe_get_cell__(table, r_idx, 1)
+                    if val is not None:
+                        extracted_values['type'] = " ".join(val.splitlines())
 
                 if self.__is_fuzzy_match__(row_key_text, 'msic'):
-                    str = table[r_idx].get(1).strip()
-                    extracted_values['msic'] = " ".join(str.splitlines())
+                    val = self.__safe_get_cell__(table, r_idx, 1)
+                    if val is not None:
+                        extracted_values['msic'] = " ".join(val.splitlines())
 
                 if self.__is_fuzzy_match__(row_key_text, 'type') and (self.__is_fuzzy_match__(row_key_text, 'business commenced') or self.__is_fuzzy_match__(row_key_text, 'last changed date') or self.__is_fuzzy_match__(row_key_text, 'rob search date') or self.__is_fuzzy_match__(row_key_text, 'current registration expiry date')):
                     self.relevant_paras['partnership'] = r_idx
@@ -666,56 +717,92 @@ class DocumentDataExtractor:
             for r_idx in table:
                 row_key_text = table[r_idx].get(0, "").strip().lower()
                 if self.__is_fuzzy_match__(row_key_text, 'revenue (rm)'):
-                    extracted_values['revenue_0'] = table[r_idx].get(1).strip()
+                    val = self.__safe_get_cell__(table, r_idx, 1)
+                    if val is not None:
+                        extracted_values['revenue_0'] = val
                 if self.__is_fuzzy_match__(row_key_text, 'profit after tax (rm)'):
-                    extracted_values['profit_after_tax_0'] = table[r_idx].get(1).strip()
+                    val = self.__safe_get_cell__(table, r_idx, 1)
+                    if val is not None:
+                        extracted_values['profit_after_tax_0'] = val
                 if self.__is_fuzzy_match__(row_key_text, 'paid up capital (rm)'):
-                    extracted_values['paid_up_capital'] = table[r_idx].get(1).strip()
+                    val = self.__safe_get_cell__(table, r_idx, 1)
+                    if val is not None:
+                        extracted_values['paid_up_capital'] = val
 
         elif table_type == 'FINANCIAL_STATEMENTS':
             for r_idx in table:
                 row_key_text = table[r_idx].get(0, "").strip().lower()
                 if self.__is_fuzzy_match__(row_key_text, 'financial year end'):
-                    extracted_values['financial_year_end'] = table[r_idx].get(1).strip()
+                    val = self.__safe_get_cell__(table, r_idx, 1)
+                    if val is not None:
+                        extracted_values['financial_year_end'] = val
                 
                 if self.__is_fuzzy_match__(row_key_text, 'non-current assets'):
-                    extracted_values['non_current_assets'] = table[r_idx].get(1).strip()
+                    val = self.__safe_get_cell__(table, r_idx, 1)
+                    if val is not None:
+                        extracted_values['non_current_assets'] = val
                     
                 elif self.__is_fuzzy_match__(row_key_text, 'current assets'):
-                    extracted_values['current_assets'] = table[r_idx].get(1).strip()
+                    val = self.__safe_get_cell__(table, r_idx, 1)
+                    if val is not None:
+                        extracted_values['current_assets'] = val
                     
                 elif self.__is_fuzzy_match__(row_key_text, 'total assets'):
-                    extracted_values['total_assets'] = table[r_idx].get(1).strip()
+                    val = self.__safe_get_cell__(table, r_idx, 1)
+                    if val is not None:
+                        extracted_values['total_assets'] = val
 
                 if self.__is_fuzzy_match__(row_key_text, 'non-current liabilities'):
-                    extracted_values['non_current_liabilities'] = table[r_idx].get(1).strip()
+                    val = self.__safe_get_cell__(table, r_idx, 1)
+                    if val is not None:
+                        extracted_values['non_current_liabilities'] = val
                 elif self.__is_fuzzy_match__(row_key_text, 'current liabilities'):
-                    extracted_values['current_liabilities'] = table[r_idx].get(1).strip()
+                    val = self.__safe_get_cell__(table, r_idx, 1)
+                    if val is not None:
+                        extracted_values['current_liabilities'] = val
                 elif self.__is_fuzzy_match__(row_key_text, 'long term liabilities'):
-                    extracted_values['long_term_liabilities'] = table[r_idx].get(1).strip()
+                    val = self.__safe_get_cell__(table, r_idx, 1)
+                    if val is not None:
+                        extracted_values['long_term_liabilities'] = val
                 elif self.__is_fuzzy_match__(row_key_text, 'total liabilities'):
-                    extracted_values['total_liabilities'] = table[r_idx].get(1).strip()
+                    val = self.__safe_get_cell__(table, r_idx, 1)
+                    if val is not None:
+                        extracted_values['total_liabilities'] = val
                      
                 if self.__is_fuzzy_match__(row_key_text, 'retained earning'):
-                    extracted_values['retained_earning'] = table[r_idx].get(1).strip()
+                    val = self.__safe_get_cell__(table, r_idx, 1)
+                    if val is not None:
+                        extracted_values['retained_earning'] = val
 
                 if self.__is_fuzzy_match__(row_key_text, 'net worth (ta - tl)'):
-                    extracted_values['net_worth'] = table[r_idx].get(1).strip()
+                    val = self.__safe_get_cell__(table, r_idx, 1)
+                    if val is not None:
+                        extracted_values['net_worth'] = val
                 
                 if self.__is_fuzzy_match__(row_key_text, 'revenue'):
-                    extracted_values['revenue_1'] = table[r_idx].get(1).strip()
+                    val = self.__safe_get_cell__(table, r_idx, 1)
+                    if val is not None:
+                        extracted_values['revenue_1'] = val
 
                 if self.__is_fuzzy_match__(row_key_text, 'profit / (loss) after tax'):
-                    extracted_values['profit_after_tax_1'] = table[r_idx].get(1).strip()
+                    val = self.__safe_get_cell__(table, r_idx, 1)
+                    if val is not None:
+                        extracted_values['profit_after_tax_1'] = val
 
                 if self.__is_fuzzy_match__(row_key_text, 'current ratio'):
-                    extracted_values['current_ratio'] = table[r_idx].get(1).strip()
+                    val = self.__safe_get_cell__(table, r_idx, 1)
+                    if val is not None:
+                        extracted_values['current_ratio'] = val
 
                 if self.__is_fuzzy_match__(row_key_text, 'gearing ratio'):
-                    extracted_values['gearing_ratio'] = table[r_idx].get(1).strip()
+                    val = self.__safe_get_cell__(table, r_idx, 1)
+                    if val is not None:
+                        extracted_values['gearing_ratio'] = val
 
                 if self.__is_fuzzy_match__(row_key_text, 'debt to equity ratio [%]'):
-                    extracted_values['debt_to_equity_ratio'] = table[r_idx].get(1).strip()
+                    val = self.__safe_get_cell__(table, r_idx, 1)
+                    if val is not None:
+                        extracted_values['debt_to_equity_ratio'] = val
 
         return extracted_values
 
