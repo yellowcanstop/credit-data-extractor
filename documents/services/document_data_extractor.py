@@ -185,7 +185,7 @@ class DocumentDataExtractor:
         tagged_tables = self.__identify_tables_from_json__()
         extracted_data = self.__extract_from_tagged_tables__(tagged_tables)
         parsed_data = self.__parse_extracted_data__(extracted_data)
-        # if openai is low confidence, escalate to human review
+        # TODO if openai is low confidence, escalate to human review
         
         return parsed_data
     

@@ -1,12 +1,11 @@
-"""Extracts invoice data from a document.
+"""Extracts data from a report.
 
-This module provides the blueprint for an Azure Function activity that extracts invoice data from a document using Azure OpenAI.
+This module provides the blueprint for an Azure Function activity that extracts data from a document using Azure Document Intelligence Prebuilt Layout Model, with a multimodal foundation model from Microsoft Foundry as a fallback.
 """
 
 from __future__ import annotations
 from pydantic import Field
 from documents.services.document_data_extractor import DocumentDataExtractor, DocumentDataExtractorOptions
-from invoices.models.invoice import Invoice
 from shared.workflows.base_request import BaseRequest
 from shared.workflows.validation_result import ValidationResult
 from storage.services.azure_storage_client_factory import AzureStorageClientFactory
@@ -15,9 +14,9 @@ import shared.identity as identity
 from shared import app_settings
 import azure.durable_functions as df
 import logging
-from typing import Optional
+from typing import Dict, Optional
 
-name = "ExtractInvoice"
+name = "ExtractData"
 bp = df.Blueprint()
 storage_factory = AzureStorageClientFactory(identity.default_credential)
 document_extractor = DocumentDataExtractor(identity.default_credential)
@@ -25,11 +24,11 @@ document_extractor = DocumentDataExtractor(identity.default_credential)
 
 @bp.function_name(name)
 @bp.activity_trigger(input_name="input", activity=name)
-def run(input: Request) -> ConfidenceResult[Invoice]:
-    """Extracts invoice data from a document using Azure OpenAI.
+def run(input: Request) -> Dict:
+    """Extracts report data from a document using Azure OpenAI.
 
     :param input: The request containing the container name and blob name of the document.
-    :return: The extracted invoice data if successful; otherwise, None.
+    :return: The extracted report data if successful; otherwise, None.
     """
 
     validation_result = input.validate()
@@ -40,14 +39,13 @@ def run(input: Request) -> ConfidenceResult[Invoice]:
     blob_content = storage_factory.get_blob_content(
         app_settings.azure_storage_account, input.container_name, input.blob_name)
 
-    data = document_extractor.from_bytes(
+    data = document_extractor.extract_using_doc_intelligence(
         blob_content,
-        Invoice,
         DocumentDataExtractorOptions(
-            extraction_prompt="""Extract the data from this invoice.
+            extraction_prompt="""Extract the data from this report.
     - If a value is not present, provide null.
-    - It is possible that there are multiple invoices in the same document across multiple pages.
-    - Some values must be inferred based on the content defined in the invoice.
+    - It is possible that there are multiple reports in the same document across multiple pages.
+    - Some values must be inferred based on the content defined in the report.
     - Dates should be in the format YYYY-MM-DD.""",
             page_start=input.page_range_start,
             page_end=input.page_range_end,
@@ -63,7 +61,7 @@ def run(input: Request) -> ConfidenceResult[Invoice]:
 
 
 class Request(BaseRequest):
-    """Defines the request payload for the `ExtractInvoice` activity."""
+    """Defines the request payload for the `ExtractReport` activity."""
 
     container_name: str = Field(
         description="The name of the container within the storage account.")
