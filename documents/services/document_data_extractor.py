@@ -338,7 +338,7 @@ class DocumentDataExtractor:
             if self.__is_fuzzy_match__(header_text, 'credit info at a glance') or self.__is_fuzzy_match__(header_text, 'credit info') or self.__is_fuzzy_match__(header_text, 'bankruptcy proceedings record'):
                 return [{'idx': table_idx, 'type': 'CREDIT_INFO_AT_A_GLANCE'}]
             
-            if self.__is_fuzzy_match__(header_text, 'c1: banking payment records (source: ccris, bank negara malaysia)' or self.__is_fuzzy_match__(header_text, 'ccris entity key') or self.__is_fuzzy_match__(header_text, 'ccris summary') or self.__is_fuzzy_match__(header_text, 'credit applications') or self.__is_fuzzy_match__(header_text, 'approved in past 12 months') or self.__is_fuzzy_match__(header_text, 'summary of potential & current liabilities') or self.__is_fuzzy_match__(header_text, 'as borrower')):
+            if self.__is_fuzzy_match__(header_text, 'c1: banking payment records (source: ccris, bank negara malaysia)') or self.__is_fuzzy_match__(header_text, 'ccris entity key') or self.__is_fuzzy_match__(header_text, 'ccris summary') or self.__is_fuzzy_match__(header_text, 'credit applications') or self.__is_fuzzy_match__(header_text, 'approved in past 12 months') or self.__is_fuzzy_match__(header_text, 'summary of potential & current liabilities') or self.__is_fuzzy_match__(header_text, 'as borrower'):
                 return [{'idx': table_idx, 'type': 'CCRIS_SUMMARY'}]
             
             if self.__is_fuzzy_match__(header_text, 'ccris details)') or self.__is_fuzzy_match__(header_text, 'loan information') or self.__is_fuzzy_match__(header_text, 'outstanding credit') or (self.__is_fuzzy_match__(header_text, 'no') and table.column_count == 25):
@@ -650,7 +650,7 @@ class DocumentDataExtractor:
                     str = table[r_idx].get(1).strip()
                     extracted_values['msic'] = " ".join(str.splitlines())
 
-                if self.__is_fuzzy_match__(row_key_text, 'type') and (self.__is_fuzzy_match__(row_key_text, 'business commenced' or self.__is_fuzzy_match__(row_key_text, 'last changed date') or self.__is_fuzzy_match__(row_key_text, 'rob search date') or self.__is_fuzzy_match__(row_key_text, 'current registration expiry date'))):
+                if self.__is_fuzzy_match__(row_key_text, 'type') and (self.__is_fuzzy_match__(row_key_text, 'business commenced') or self.__is_fuzzy_match__(row_key_text, 'last changed date') or self.__is_fuzzy_match__(row_key_text, 'rob search date') or self.__is_fuzzy_match__(row_key_text, 'current registration expiry date')):
                     self.relevant_paras['partnership'] = r_idx
         
         elif table_type == 'FINANCIALS_AND_SHAREHOLDERS':

@@ -39,10 +39,17 @@ def run(context: df.DurableOrchestrationContext):
                 container_name=input.container_name,
                 blob_name=document))
 
-        if not extracted_data:
+        if extracted_data is None:
             result.add_error(
                 extract_data.name,
                 f"Failed to extract data for {document}.")
             continue
-
+        
+        if not extracted_data:
+            result.add_error(
+                extract_data.name,
+                f"No data extracted for {document} (Empty result)."
+            )
+            continue
+    
     return result.model_dump()
