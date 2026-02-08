@@ -15,6 +15,9 @@ from shared.confidence.confidence_utils import merge_confidence_values
 from shared.confidence.openai_confidence import evaluate_confidence as evaluate_confidence_openai
 from shared.confidence.document_intelligence_confidence import evaluate_confidence as evaluate_confidence_di
 from shared.confidence.confidence_result import ConfidenceResult, OVERALL_CONFIDENCE_KEY
+import logging
+
+logger = logging.getLogger(__name__)
 
 class ReportType(enum.Enum):
     INDIVIDUAL = "INDIVIDUAL"
@@ -169,26 +172,51 @@ class DocumentDataExtractor:
         )
     
     def extract_using_doc_intelligence(self, document_bytes: bytes, options: DocumentDataExtractorOptions): 
-        di_client = self.__get_document_intelligence_client__(options)
+        logger.info("Starting extraction, document size: %d bytes", len(document_bytes))
+        
+        try:
+            di_client = self.__get_document_intelligence_client__(options)
+        except Exception as e:
+            logger.error("Failed to create Document Intelligence client: %s", e, exc_info=True)
+            raise
 
         if options.page_start and options.page_end:
             page_range = f"{options.page_start}-{options.page_end}"
         else:
             page_range = None
         
-        poller = di_client.begin_analyze_document(
-            model_id="prebuilt-layout",
-            body=document_bytes,
-            pages=page_range,
-            output_content_format=DocumentContentFormat.MARKDOWN,
-            content_type="application/pdf"
-        )
-        self.result: AnalyzeResult = poller.result()
-        self.relevant_paras.update(self.__find_paragraphs__())
-        self.report_type = self.__classify_report_type__()
-        tagged_tables = self.__identify_tables_from_json__()
-        extracted_data = self.__extract_from_tagged_tables__(tagged_tables)
-        parsed_data = self.__parse_extracted_data__(extracted_data)
+        try:
+            poller = di_client.begin_analyze_document(
+                model_id="prebuilt-layout",
+                body=document_bytes,
+                pages=page_range,
+                output_content_format=DocumentContentFormat.MARKDOWN,
+                content_type="application/pdf"
+            )
+
+            self.result: AnalyzeResult = poller.result()
+            logger.debug("Document Intelligence returned %d tables, %d paragraphs", len(self.result.tables or []), len(self.result.paragraphs or []))
+
+            self.relevant_paras.update(self.__find_paragraphs__())
+            logger.debug("Identified relevant paragraphs: %s", self.relevant_paras)
+
+            self.report_type = self.__classify_report_type__()
+            logger.info("Classified report type as: %s", self.report_type.value)
+
+            tagged_tables = self.__identify_tables_from_json__()
+            logger.info("Tagged %d relevant tables for extraction", len(tagged_tables))
+
+            extracted_data = self.__extract_from_tagged_tables__(tagged_tables)
+            logger.debug("Extracted data: %s", extracted_data)
+
+            parsed_data = self.__parse_extracted_data__(extracted_data)
+            logger.debug("Parsed extracted data: %s", parsed_data)
+            logger.info("Completed extraction successfully")
+
+        except Exception as e:
+            logger.error("Extraction failed: %s", e, exc_info=True)
+            raise
+
         # TODO if openai is low confidence, escalate to human review
         
         return parsed_data
@@ -196,8 +224,17 @@ class DocumentDataExtractor:
     def __find_paragraphs__(self) -> Dict[str, int]:
         """Locate relevant paragraphs since information is captured either as paragraphs or tables."""
         relevant_paras = {}
+
+        if not self.result.paragraphs:
+            return relevant_paras
+        
+        num_paragraphs = len(self.result.paragraphs)
+        
         for idx, para in enumerate(self.result.paragraphs):
             para_text = para.content.strip().lower()
+
+            if idx + 1 >= num_paragraphs:
+                continue
             
             if self.__is_fuzzy_match__(para_text, 'c1: banking payment records (source: ccris, bank negara malaysia)'):
                 ccris = self.result.paragraphs[idx + 1].content.strip().lower()
@@ -219,8 +256,10 @@ class DocumentDataExtractor:
         tagged_tables = []
         
         if not self.result.tables:
+            logger.warning("No tables found in document")
             return tagged_tables
         
+        logger.info("Processing %d tables for tagging", len(self.result.tables))
         paragraphs = self.result.paragraphs or []
         
         for table_idx, table in enumerate(self.result.tables):
@@ -248,6 +287,7 @@ class DocumentDataExtractor:
                         'table': lookup_table
                     })
         
+        logger.info("Tagged %d tables after processing", len(tagged_tables))
         return tagged_tables
 
     def __find_missing_header__(self, table_region, paragraphs) -> Optional[str]:
@@ -672,6 +712,8 @@ class DocumentDataExtractor:
 
     def __parse_extracted_data__(self, extracted_data: Dict):
         """Parses and validates extracted data into final structured format."""
+        logger.debug("Parsing extracted data keys: %s", list(extracted_data.keys()))
+
         parsed_data = {}
         if self.report_type == ReportType.INDIVIDUAL:
             
@@ -867,6 +909,7 @@ class DocumentDataExtractor:
         try:
             clean_value = value.replace(',', '').replace(' ', '').replace('%', '')
             if not clean_value:
+                logger.warning("Empty value passed to __str_to_decimal__")
                 return Decimal(0)
             if clean_value.startswith('(') and clean_value.endswith(')'):
                 clean_value = '-' + clean_value[1:-1]
@@ -876,7 +919,8 @@ class DocumentDataExtractor:
             if '%' in value:
                 return result / 100
             return result
-        except (InvalidOperation, AttributeError):
+        except (InvalidOperation, AttributeError) as e:
+            logger.warning("Failed to parse '%s' as Decimal: %s", value, e)
             return Decimal(0)
     
     def __parse_conduct_values(self, conduct_values: List[str]) -> str:
@@ -951,7 +995,12 @@ class DocumentDataExtractor:
         To call this method, poppler-utils must be installed on the system.
         """
 
-        pages = convert_from_bytes(document_bytes)
+        try:
+            pages = convert_from_bytes(document_bytes)
+            logger.debug("Converted PDF to %d images", len(pages))
+        except Exception as e:
+            logger.error("PDF to image conversion failed: %s", e, exc_info=True)
+            raise ValueError(f"Failed to convert PDF to images: {e}") from e
 
         image_uris = []
 
