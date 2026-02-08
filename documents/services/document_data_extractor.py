@@ -63,6 +63,7 @@ class DocumentDataExtractor:
         self.credential = credential
         self.result: AnalyzeResult = None
         self.report_type: ReportType = None
+        self.relevant_paras: Dict[str, int] = {}
 
     def from_bytes(self, document_bytes: bytes, response_format: type[ResponseFormatT], options: DocumentDataExtractorOptions) -> ExtractionConfidenceResult:
         """Extracts structured data from the specified document bytes by converting the document to images and using an Azure OpenAI model to extract the data.
@@ -179,18 +180,36 @@ class DocumentDataExtractor:
             content_type="application/pdf"
         )
         self.result: AnalyzeResult = poller.result()
-        
+        self.relevant_paras.update(self.__find_paragraphs__())
+        # TODO auto classify company or individual report based on snapshot table (new id, old id, date of birth)
         tagged_tables = self.__identify_tables_from_json__()
         extracted_data = self.__extract_from_tagged_tables__(tagged_tables)
-        self.__parse_extracted_data__(extracted_data)
+        parsed_data = self.__parse_extracted_data__(extracted_data)
         # for the optional tables (ccris for company, no financials_and_shareholders and financial_statements for partnership), validate if all present relevant tables are accounted for by checking against markdown. if not, send image to openai
         # if doc intelligence low confidence, send to openai
         # if openai is low confidence, escalate to human review
         
-        return {
-            'extracted_data': extracted_data,
-            'tagged_tables': tagged_tables
-        }
+        return parsed_data
+    
+    def __find_paragraphs__(self) -> Dict[str, int]:
+        """Locate relevant paragraphs since information is captured either as paragraphs or tables."""
+        relevant_paras = {}
+        for idx, para in enumerate(self.result.paragraphs):
+            para_text = para.content.strip().lower()
+            
+            if self.__is_fuzzy_match__(para_text, 'c1: banking payment records (source: ccris, bank negara malaysia)'):
+                ccris = self.result.paragraphs[idx + 1].content.strip().lower()
+                if ccris and self.__is_fuzzy_match__(ccris, 'a check with bank negara malaysia returned no result on subject'):
+                    relevant_paras['ccris_not_available'] = idx
+            if self.__is_fuzzy_match__(para_text, 'd1: legal cases (subject as defendant)'):
+                defendant = self.result.paragraphs[idx + 1].content.strip().lower()
+                if defendant and self.__is_fuzzy_match__(defendant, 'no information available'):
+                    relevant_paras['legal_defendant_none'] = idx
+            if self.__is_fuzzy_match__(para_text, 'd2: legal cases (subject as plaintiff)'):
+                plaintiff = self.result.paragraphs[idx + 1].content.strip().lower()
+                if plaintiff and self.__is_fuzzy_match__(plaintiff, 'no information available'):
+                    relevant_paras['legal_plaintiff_none'] = idx
+        return relevant_paras
         
     def __identify_tables_from_json__(self) -> List[Dict]:
         """Identify relevant tables."""
@@ -562,12 +581,20 @@ class DocumentDataExtractor:
                 row_key_text = table[r_idx].get(0, "").strip().lower()
                 if self.__is_fuzzy_match__(row_key_text, 'registration date'):
                     extracted_values['registration_date'] = table[r_idx].get(1).strip()
+
                 if self.__is_fuzzy_match__(row_key_text, 'type of company'):
                     str = table[r_idx].get(1).strip()
-                    extracted_values['type_of_company'] = " ".join(str.splitlines())
-                if self.__is_fuzzy_match__(row_key_text, 'business sector'):
+                    extracted_values['type'] = " ".join(str.splitlines())
+                elif self.__is_fuzzy_match__(row_key_text, 'type'):
                     str = table[r_idx].get(1).strip()
-                    extracted_values['business_sector'] = " ".join(str.splitlines())
+                    extracted_values['type'] = " ".join(str.splitlines())
+
+                if self.__is_fuzzy_match__(row_key_text, 'msic'):
+                    str = table[r_idx].get(1).strip()
+                    extracted_values['msic'] = " ".join(str.splitlines())
+
+                if self.__is_fuzzy_match__(row_key_text, 'type') and (self.__is_fuzzy_match__(row_key_text, 'business commenced' or self.__is_fuzzy_match__(row_key_text, 'last changed date') or self.__is_fuzzy_match__(row_key_text, 'rob search date') or self.__is_fuzzy_match__(row_key_text, 'current registration expiry date'))):
+                    self.relevant_paras['partnership'] = r_idx
         
         elif table_type == 'FINANCIALS_AND_SHAREHOLDERS':
             for r_idx in table:
@@ -636,8 +663,9 @@ class DocumentDataExtractor:
 
             # TODO compare with doc intelligence extraction (if available)
             self.extract_using_image('ccris_detail')
-            
-            if extracted_data.get('total_outstanding_balance_0') and extracted_data.get('total_outstanding_balance_1') and extracted_data.get('total_limit_0') and extracted_data.get('total_limit_1'):
+
+            util_keys = ['total_outstanding_balance_0', 'total_outstanding_balance_1', 'total_limit_0', 'total_limit_1']
+            if all(extracted_data.get(key) is not None for key in util_keys):
                 if extracted_data['total_outstanding_balance_0'] == extracted_data['total_outstanding_balance_1'] and extracted_data['total_limit_0'] == extracted_data['total_limit_1']:
                     bal = self.__str_to_decimal__(extracted_data['total_outstanding_balance_0'])
                     limit = self.__str_to_decimal__(extracted_data['total_limit_0'])
@@ -645,18 +673,17 @@ class DocumentDataExtractor:
                         utilisation = bal / limit * 100
                         parsed_data['utilisation'] = utilisation
 
-            if extracted_data.get('special_attention_accounts_0') and extracted_data.get('special_attention_accounts_1'):
+            spa_keys = ['special_attention_accounts_0', 'special_attention_accounts_1']
+            if all(extracted_data.get(key) is not None for key in spa_keys):
                 # saa_0 is 'NO', saa_1 is 'N'
                 str = extracted_data['special_attention_accounts_0']
                 if str[0] == extracted_data['special_attention_accounts_1']:
                     parsed_data['special_attention_accounts'] = extracted_data['special_attention_accounts_0']
 
-            if extracted_data.get('legal_non_personal') and extracted_data.get('legal_personal'):
-                if extracted_data['legal_non_personal'] == '0' and extracted_data['legal_personal'] == '0':
-                    defendant = self.__check_paragraph('d1: legal cases (subject as defendant)')
-                    plaintiff = self.__check_paragraph('d2: legal cases (subject as plaintiff)')
-                    if defendant and self.__is_fuzzy_match__(defendant, 'no information available' and plaintiff and self.__is_fuzzy_match__(plaintiff, 'no information available')):
-                        parsed_data['legal_cases'] = 0
+            legal_keys = ['legal_non_personal', 'legal_personal']
+            if all(extracted_data.get(key) is not None for key in legal_keys):
+                if extracted_data['legal_non_personal'] == '0' and extracted_data['legal_personal'] == '0' and self.relevant_paras.get('legal_plaintiff_none') is not None and self.relevant_paras.get('legal_defendant_none') is not None:
+                    parsed_data['legal_cases'] = 0
                 else:
                     np = int(extracted_data['legal_non_personal'])
                     p = int(extracted_data['legal_personal'])
@@ -674,8 +701,7 @@ class DocumentDataExtractor:
             
         elif self.report_type == ReportType.COMPANY:
             
-            ccris = self.__check_paragraph('c1: banking payment records (source: ccris, bank negara malaysia)')
-            if ccris and self.__is_fuzzy_match__(ccris, 'a check with bank negara malaysia returned no result on subject'):
+            if self.relevant_paras.get('ccris_not_available') is not None:
                 parsed_data['repayment_to_banks'] = 'N/A'
                 parsed_data['utilisation'] = 'N/A'
             else:
@@ -685,7 +711,8 @@ class DocumentDataExtractor:
                 # TODO compare with doc intelligence extraction (if available)
                 self.extract_using_image('ccris_detail')
 
-                if extracted_data.get('total_outstanding_balance_0') and extracted_data.get('total_outstanding_balance_1') and extracted_data.get('total_limit_0') and extracted_data.get('total_limit_1'):
+                util_keys = ['total_outstanding_balance_0', 'total_outstanding_balance_1', 'total_limit_0', 'total_limit_1']
+                if all(extracted_data.get(key) is not None for key in util_keys):
                     if extracted_data['total_outstanding_balance_0'] == extracted_data['total_outstanding_balance_1'] and extracted_data['total_limit_0'] == extracted_data['total_limit_1']:
                         bal = self.__str_to_decimal__(extracted_data['total_outstanding_balance_0'])
                         limit = self.__str_to_decimal__(extracted_data['total_limit_0'])
@@ -693,85 +720,112 @@ class DocumentDataExtractor:
                             utilisation = bal / limit * 100
                             parsed_data['utilisation'] = utilisation
 
-            if extracted_data.get('special_attention_accounts_entity'):
+                if parsed_data.get('utilisation') is None:
+                    self.extract_using_image('ccris_summary')
+
+            if extracted_data.get('special_attention_accounts_entity') is not None:
                 parsed_data['special_attention_accounts'] = extracted_data['special_attention_accounts_entity']
 
-            if extracted_data.get('legal_non_personal_entity') and extracted_data.get('legal_personal_entity'):
-                if extracted_data['legal_non_personal_entity'] == '0' and extracted_data['legal_personal_entity'] == '0':
-                    defendant = self.__check_paragraph('d1: legal cases (subject as defendant)')
-                    plaintiff = self.__check_paragraph('d2: legal cases (subject as plaintiff)')
-                    if defendant and self.__is_fuzzy_match__(defendant, 'no information available' and plaintiff and self.__is_fuzzy_match__(plaintiff, 'no information available')):
-                        parsed_data['legal_cases'] = 0
+            if extracted_data.get('legal_non_personal_entity') is not None and extracted_data.get('legal_personal_entity') is not None:
+                if extracted_data['legal_non_personal_entity'] == '0' and extracted_data['legal_personal_entity'] == '0' and self.relevant_paras.get('legal_plaintiff_none') is not None and self.relevant_paras.get('legal_defendant_none') is not None:
+                    parsed_data['legal_cases'] = 0
                 else:
                     np = int(extracted_data['legal_non_personal_entity'])
                     p = int(extracted_data['legal_personal_entity'])
                     parsed_data['legal_cases'] = np + p
 
+            if (parsed_data.get('special_attention_accounts') is None) or (parsed_data.get('legal_cases') is None):
+                self.extract_using_image('credit_info_at_a_glance')
+                
             # TODO check blacklist
 
-            if extracted_data.get('registration_date'):
+            if extracted_data.get('registration_date') is not None:
                 parsed_data['years_in_business'] = self.__calculate_years__(extracted_data['registration_date'])
 
-            if extracted_data.get('type_of_company'):
-                type = extracted_data['type_of_company']
+            if extracted_data.get('type') is not None:
+                type = extracted_data['type']
                 if self.__is_fuzzy_match__(type, 'limited by shares private limited'):
                     parsed_data['type_of_company'] = 'Sdn Bhd'
                 else: 
                     parsed_data['type_of_company'] = 'Non - Sdn Bhd'
             
-            if extracted_data.get('business_sector'):
-                parsed_data['nature_of_business'] = extracted_data['business_sector']
+            if extracted_data.get('msic') is not None:
+                parsed_data['nature_of_business'] = extracted_data['msic']
+            
+            if parsed_data.get('years_in_business') is None or parsed_data.get('type_of_company') is None or parsed_data.get('nature_of_business') is None:
+                self.extract_using_image('snapshot')
 
-            # n/a for non sdn bhd
-            if extracted_data.get('paid_up_capital'):
-                parsed_data['paid_up_capital'] = self.__str_to_decimal__(extracted_data['paid_up_capital'])
-        
-            if extracted_data.get('financial_year_end'):
-                parsed_data['financial_report_date'] = self.__reformat_date__(extracted_data['financial_year_end'])
+            if self.relevant_paras.get('partnership') is not None and parsed_data.get('type_of_company') == 'Non - Sdn Bhd':
+                parsed_data['paid_up_capital'] = 'N/A'
+                parsed_data['financial_report_date'] = 'N/A'
+                parsed_data['turnover'] = 'N/A'
+                parsed_data['net_profit'] = 'N/A'
+                parsed_data['retained_profit'] = 'N/A'
+                parsed_data['net_worth'] = 'N/A'
+                parsed_data['net_current_assets'] = 'N/A'
+                parsed_data['current_ratio'] = 'N/A'
+                parsed_data['gearing_ratio'] = 'N/A'
+            else:
+                if extracted_data.get('paid_up_capital') is not None:
+                    parsed_data['paid_up_capital'] = self.__str_to_decimal__(extracted_data['paid_up_capital'])
+            
+                if extracted_data.get('financial_year_end') is not None:
+                    parsed_data['financial_report_date'] = self.__reformat_date__(extracted_data['financial_year_end'])
 
-            if extracted_data.get('revenue_0') and extracted_data.get('revenue_1'):
-                if extracted_data['revenue_0'] == extracted_data['revenue_1']:
-                    parsed_data['turnover'] = self.__str_to_decimal__(extracted_data['revenue_0'])
+                if extracted_data.get('revenue_0') is not None and extracted_data.get('revenue_1') is not None:
+                    if extracted_data['revenue_0'] == extracted_data['revenue_1']:
+                        parsed_data['turnover'] = self.__str_to_decimal__(extracted_data['revenue_0'])
 
-            if extracted_data.get('profit_after_tax_0') and extracted_data.get('profit_after_tax_1'):
-                if extracted_data['profit_after_tax_0'] == extracted_data['profit_after_tax_1']:
-                    parsed_data['net_profit'] = self.__str_to_decimal__(extracted_data['profit_after_tax_0'])
+                if extracted_data.get('profit_after_tax_0') is not None and extracted_data.get('profit_after_tax_1') is not None:
+                    if extracted_data['profit_after_tax_0'] == extracted_data['profit_after_tax_1']:
+                        parsed_data['net_profit'] = self.__str_to_decimal__(extracted_data['profit_after_tax_0'])
 
-            if extracted_data.get('retained_earning'):
-                parsed_data['retained_profit'] = self.__str_to_decimal__(extracted_data['retained_earning'])
+                if extracted_data.get('retained_earning') is not None:
+                    parsed_data['retained_profit'] = self.__str_to_decimal__(extracted_data['retained_earning'])
 
-            if extracted_data.get('net_worth'):
-                parsed_data['net_worth'] = self.__str_to_decimal__(extracted_data['net_worth'])
+                if extracted_data.get('net_worth') is not None:
+                    parsed_data['net_worth'] = self.__str_to_decimal__(extracted_data['net_worth'])
 
-            if extracted_data.get('current_assets') and extracted_data.get('current_liabilities') and extracted_data.get('non_current_assets') and extracted_data.get('total_assets') and extracted_data.get('non_current_liabilities') and extracted_data.get('long_term_liabilities') and extracted_data.get('total_liabilities'):
-                nca = self.__str_to_decimal__(extracted_data['non_current_assets'])
-                ca = self.__str_to_decimal__(extracted_data['current_assets'])
-                ta = self.__str_to_decimal__(extracted_data['total_assets'])
-                ncl = self.__str_to_decimal__(extracted_data['non_current_liabilities'])
-                cl = self.__str_to_decimal__(extracted_data['current_liabilities'])
-                ltl = self.__str_to_decimal__(extracted_data['long_term_liabilities'])
-                tl = self.__str_to_decimal__(extracted_data['total_liabilities'])
+                fs_key = ['current_assets', 'current_liabilities', 'non_current_assets', 'total_assets', 'non_current_liabilities', 'long_term_liabilities', 'total_liabilities']
+                if all(extracted_data.get(key) is not None for key in fs_key):
+                    nca = self.__str_to_decimal__(extracted_data['non_current_assets'])
+                    ca = self.__str_to_decimal__(extracted_data['current_assets'])
+                    ta = self.__str_to_decimal__(extracted_data['total_assets'])
+                    ncl = self.__str_to_decimal__(extracted_data['non_current_liabilities'])
+                    cl = self.__str_to_decimal__(extracted_data['current_liabilities'])
+                    ltl = self.__str_to_decimal__(extracted_data['long_term_liabilities'])
+                    tl = self.__str_to_decimal__(extracted_data['total_liabilities'])
 
-                valid_ca_cl = (ta == nca + ca) and (tl == ncl + cl + ltl)
-                if valid_ca_cl:
-                    parsed_data['net_current_assets'] = ca - cl
-                    if extracted_data.get('current_ratio'):
-                        extracted_cr = self.__str_to_decimal__(extracted_data['current_ratio'])
-                        cr = ca / cl if cl > 0 else Decimal(0)
-                        if abs(cr - extracted_cr) < Decimal('0.01'):
-                            parsed_data['current_ratio'] = extracted_cr
+                    valid_ca_cl = (ta == nca + ca) and (tl == ncl + cl + ltl)
+                    if valid_ca_cl:
+                        parsed_data['net_current_assets'] = ca - cl
+                        if extracted_data.get('current_ratio') is not None:
+                            extracted_cr = self.__str_to_decimal__(extracted_data['current_ratio'])
+                            cr = ca / cl if cl > 0 else Decimal(0)
+                            if abs(cr - extracted_cr) < Decimal('0.01'):
+                                parsed_data['current_ratio'] = extracted_cr
 
-            if extracted_data.get('gearing_ratio') and extracted_data.get('debt_to_equity_ratio') and extracted_data.get('net_worth') and extracted_data.get('total_liabilities'):
-                tl = self.__str_to_decimal__(extracted_data['total_liabilities'])
-                nw = self.__str_to_decimal__(extracted_data['net_worth'])
-                calculated_gr = tl / nw if nw > 0 else Decimal(0)
-                extracted_gr = self.__str_to_decimal__(extracted_data['gearing_ratio'])
-                extracted_der = self.__str_to_decimal__(extracted_data['debt_to_equity_ratio'])
-                valid_gr = (abs(extracted_gr - extracted_der) < Decimal('0.01')) and (abs(extracted_gr - calculated_gr) < Decimal('0.01'))
-                if valid_gr:
-                    parsed_data['gearing_ratio'] = extracted_gr
+                bal_key = ['gearing_ratio', 'debt_to_equity_ratio', 'net_worth', 'total_liabilities']
+                if all(extracted_data.get(key) is not None for key in bal_key):
+                    tl = self.__str_to_decimal__(extracted_data['total_liabilities'])
+                    nw = self.__str_to_decimal__(extracted_data['net_worth'])
+                    calculated_gr = tl / nw if nw > 0 else Decimal(0)
+                    extracted_gr = self.__str_to_decimal__(extracted_data['gearing_ratio'])
+                    extracted_der = self.__str_to_decimal__(extracted_data['debt_to_equity_ratio'])
+                    valid_gr = (abs(extracted_gr - extracted_der) < Decimal('0.01')) and (abs(extracted_gr - calculated_gr) < Decimal('0.01'))
+                    if valid_gr:
+                        parsed_data['gearing_ratio'] = extracted_gr
+                
+                if parsed_data.get('paid_up_capital') is None:
+                    self.extract_using_image('financials_and_shareholders')
+
+                if (parsed_data.get('financial_report_date') is None) or (parsed_data.get('turnover') is None) or (parsed_data.get('net_profit') is None) or (parsed_data.get('retained_profit') is None) or (parsed_data.get('net_worth') is None) or (parsed_data.get('net_current_assets') is None) or (parsed_data.get('current_ratio') is None) or (parsed_data.get('gearing_ratio') is None):
+                    self.extract_using_image('financial_statements')
 
         return parsed_data   
+    
+    def extract_using_image(self, key: str):
+        pass
 
     def __reformat_date__(self, date_str: str) -> str:
         """Reformats date string DD-MM-YYYY to YYYY-MM-DD."""
