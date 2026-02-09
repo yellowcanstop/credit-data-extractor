@@ -1199,17 +1199,18 @@ class DocumentDataExtractor:
         """
 
         try:
-            pages = convert_from_bytes(document_bytes)
-            logger.debug("Converted PDF to %d images", len(pages))
+            pages = convert_from_bytes(
+                document_bytes,
+                first_page=page_start,
+                last_page=page_end
+            )
+            logger.debug("Converted PDF pages %s to %s to %d images", page_start, page_end, len(pages))
         except Exception as e:
             logger.error("PDF to image conversion failed: %s", e, exc_info=True)
             raise ValueError(f"Failed to convert PDF to images: {e}") from e
 
         image_uris = []
-
-        if page_start and page_end:
-            pages = pages[page_start-1:page_end]
-
+        
         for page in pages:
             byteIO = io.BytesIO()
             page.save(byteIO, format='PNG')
