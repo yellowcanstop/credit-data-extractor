@@ -10,7 +10,7 @@ from thefuzz import fuzz
 import io
 from typing import Dict, List, TypeVar, Optional, Any
 from azure.ai.documentintelligence import DocumentIntelligenceClient
-from azure.ai.documentintelligence.models import AnalyzeResult, DocumentContentFormat
+from azure.ai.documentintelligence.models import AnalyzeResult, DocumentContentFormat, DocumentAnalysisFeature
 from shared.confidence.confidence_utils import merge_confidence_values
 from shared.confidence.openai_confidence import evaluate_confidence as evaluate_confidence_openai
 from shared.confidence.document_intelligence_confidence import evaluate_confidence as evaluate_confidence_di
@@ -199,7 +199,8 @@ class DocumentDataExtractor:
                 body=document_bytes,
                 pages=page_range,
                 output_content_format=DocumentContentFormat.MARKDOWN,
-                content_type="application/pdf"
+                content_type="application/pdf",
+                features=[DocumentAnalysisFeature.OCR_HIGH_RESOLUTION]
             )
 
             self.result: AnalyzeResult = poller.result()
