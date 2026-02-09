@@ -240,7 +240,7 @@ class DocumentDataExtractor:
         """
         # Handle nil/dash values first
         stripped = value.strip()
-        if stripped == '-' or stripped == '–' or stripped == '—':
+        if stripped == '-' or stripped == '–' or stripped == '—' or stripped == '':
             return '0'
         
         # Remove all commas first (they're either thousand separators or OCR errors)
@@ -269,15 +269,15 @@ class DocumentDataExtractor:
             
             if self.__is_fuzzy_match__(para_text, 'c1: banking payment records (source: ccris, bank negara malaysia)'):
                 ccris = self.__find_paragraph_below_paragraph__(para, self.result.paragraphs)
-                if ccris and self.__is_fuzzy_match__(ccris, 'a check with bank negara malaysia returned no result on subject', 95):
+                if ccris and self.__is_fuzzy_match__(ccris, 'a check with bank negara malaysia returned no result on subject', 98):
                     relevant_paras['ccris_not_available'] = idx
             if self.__is_fuzzy_match__(para_text, 'd1: legal cases (subject as defendant)'):
                 defendant = self.__find_paragraph_below_paragraph__(para, self.result.paragraphs)
-                if defendant and self.__is_fuzzy_match__(defendant, 'no information available', 95):
+                if defendant and self.__is_fuzzy_match__(defendant, 'no information available', 98):
                     relevant_paras['legal_defendant_none'] = idx
             if self.__is_fuzzy_match__(para_text, 'd2: legal cases (subject as plaintiff)'):
                 plaintiff = self.__find_paragraph_below_paragraph__(para, self.result.paragraphs)
-                if plaintiff and self.__is_fuzzy_match__(plaintiff, 'no information available', 95):
+                if plaintiff and self.__is_fuzzy_match__(plaintiff, 'no information available', 98):
                     relevant_paras['legal_plaintiff_none'] = idx
         return relevant_paras
         
@@ -993,10 +993,14 @@ class DocumentDataExtractor:
                 if extracted_data.get('revenue_0') is not None and extracted_data.get('revenue_1') is not None:
                     if self.__normalize_numeric_str__(extracted_data['revenue_0']) == self.__normalize_numeric_str__(extracted_data['revenue_1']):
                         parsed_data['turnover'] = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['revenue_0']))
+                    elif self.__normalize_numeric_str__(extracted_data['revenue_0']) == '0' and self.__normalize_numeric_str__(extracted_data['revenue_1']) == '0':
+                        parsed_data['turnover'] = Decimal(0)
                     
                 if extracted_data.get('profit_after_tax_0') is not None and extracted_data.get('profit_after_tax_1') is not None:
                     if self.__normalize_numeric_str__(extracted_data['profit_after_tax_0']) == self.__normalize_numeric_str__(extracted_data['profit_after_tax_1']):
                         parsed_data['net_profit'] = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['profit_after_tax_0']))
+                    elif self.__normalize_numeric_str__(extracted_data['profit_after_tax_0']) == '0' and self.__normalize_numeric_str__(extracted_data['profit_after_tax_1']) == '0':
+                        parsed_data['net_profit'] = Decimal(0)
                  
                 if extracted_data.get('retained_earning') is not None:
                     parsed_data['retained_profit'] = self.__str_to_decimal__(extracted_data['retained_earning'])
