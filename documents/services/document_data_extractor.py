@@ -406,7 +406,7 @@ class DocumentDataExtractor:
             
         elif self.report_type == ReportType.COMPANY:
 
-            if self.__is_fuzzy_match__(header_text, 'a: snapshot') or self.__is_fuzzy_match__(header_text, 'id verification') or self.__is_fuzzy_match__(header_text, 'company name (your input)'):
+            if self.__is_fuzzy_match__(header_text, 'a: snapshot') or self.__is_fuzzy_match__(header_text, 'id verification') or self.__is_fuzzy_match__(header_text, 'company name (your input)') or self.__is_fuzzy_match__(header_text, 'business name (your input)'):
                 return [{'idx': table_idx, 'type': 'SNAPSHOT'}]
             
             if (self.__is_fuzzy_match__(header_text, 'financials and shareholders') or self.__is_fuzzy_match__(header_text, 'last updated')) and table.column_count == 2:
@@ -421,7 +421,7 @@ class DocumentDataExtractor:
             if self.__is_fuzzy_match__(header_text, 'c1: banking payment records (source: ccris, bank negara malaysia)' or self.__is_fuzzy_match__(header_text, 'ccris entity key') or self.__is_fuzzy_match__(header_text, 'ccris summary') or self.__is_fuzzy_match__(header_text, 'credit applications') or self.__is_fuzzy_match__(header_text, 'approved in past 12 months') or self.__is_fuzzy_match__(header_text, 'summary of potential & current liabilities') or self.__is_fuzzy_match__(header_text, 'as borrower')):
                 return [{'idx': table_idx, 'type': 'CCRIS_SUMMARY'}]
             
-            if self.__is_fuzzy_match__(header_text, 'ccris details)') or self.__is_fuzzy_match__(header_text, 'loan information') or self.__is_fuzzy_match__(header_text, 'outstanding credit') or (self.__is_fuzzy_match__(header_text, 'no') and table.column_count == 25):
+            if self.__is_fuzzy_match__(header_text, 'ccris details)') or self.__is_fuzzy_match__(header_text, 'loan information') or self.__is_fuzzy_match__(header_text, 'outstanding credit') or (self.__is_fuzzy_match__(header_text, 'no') and (table.column_count == 25 or table.column_count == 14)):
                 return self.__handle_ccris_details_tables__(table_idx)
 
         # Second try: Use preceding paragraph
@@ -436,7 +436,7 @@ class DocumentDataExtractor:
                 if self.__is_fuzzy_match__(preceding_lower, 'c1: banking payment records (source: ccris, bank negara malaysia)') or self.__is_fuzzy_match__(preceding_lower, 'ccris entity key') or self.__is_fuzzy_match__(preceding_lower, 'ccris summary') or self.__is_fuzzy_match__(preceding_lower, 'credit applications') or self.__is_fuzzy_match__(preceding_lower, 'approved in past 12 months') or self.__is_fuzzy_match__(preceding_lower, 'summary of potential & current liabilities') or self.__is_fuzzy_match__(preceding_lower, 'as borrower'):
                     return [{'idx': table_idx, 'type': 'CCRIS_SUMMARY'}]
                 
-                if self.__is_fuzzy_match__(preceding_lower, 'ccris details)') or self.__is_fuzzy_match__(preceding_lower, 'loan information') or self.__is_fuzzy_match__(preceding_lower, 'outstanding credit') or (self.__is_fuzzy_match__(preceding_lower, 'no') and table.column_count == 25):
+                if self.__is_fuzzy_match__(preceding_lower, 'ccris details)') or self.__is_fuzzy_match__(preceding_lower, 'loan information') or self.__is_fuzzy_match__(preceding_lower, 'outstanding credit') or (self.__is_fuzzy_match__(preceding_lower, 'no') and (table.column_count == 25 or table.column_count == 14)):
                     return self.__handle_ccris_details_tables__(table_idx)
                 
             elif self.report_type == ReportType.COMPANY:
@@ -456,7 +456,7 @@ class DocumentDataExtractor:
                 if self.__is_fuzzy_match__(preceding_lower, 'c1: banking payment records (source: ccris, bank negara malaysia)') or self.__is_fuzzy_match__(preceding_lower, 'ccris entity key') or self.__is_fuzzy_match__(preceding_lower, 'ccris summary') or self.__is_fuzzy_match__(preceding_lower, 'credit applications') or self.__is_fuzzy_match__(preceding_lower, 'approved in past 12 months') or self.__is_fuzzy_match__(preceding_lower, 'summary of potential & current liabilities') or self.__is_fuzzy_match__(preceding_lower, 'as borrower'):
                     return [{'idx': table_idx, 'type': 'CCRIS_SUMMARY'}]
                 
-                if self.__is_fuzzy_match__(preceding_lower, 'ccris details)') or self.__is_fuzzy_match__(preceding_lower, 'loan information') or self.__is_fuzzy_match__(preceding_lower, 'outstanding credit') or (self.__is_fuzzy_match__(preceding_lower, 'no') and table.column_count == 25):
+                if self.__is_fuzzy_match__(preceding_lower, 'ccris details)') or self.__is_fuzzy_match__(preceding_lower, 'loan information') or self.__is_fuzzy_match__(preceding_lower, 'outstanding credit') or (self.__is_fuzzy_match__(preceding_lower, 'no') and (table.column_count == 25 or table.column_count == 14)):
                     return self.__handle_ccris_details_tables__(table_idx)
                 
         return [{'idx': table_idx, 'type': 'UNKNOWN'}]
@@ -739,7 +739,7 @@ class DocumentDataExtractor:
                     if val is not None:
                         extracted_values['registration_date'] = val
                 
-                if self.__is_fuzzy_match__(row_key_text, 'type'):
+                if self.__is_fuzzy_match__(row_key_text, 'type', 100):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['type'] = " ".join(val.splitlines())
@@ -864,6 +864,7 @@ class DocumentDataExtractor:
                 parsed_data['repayment_to_banks'] = self.__parse_conduct_values(extracted_data['ccris_conduct'])
 
             # TODO compare with doc intelligence extraction (if available)
+            # if there is ccris_detail_single, but no util, then the ccris_detail_single might actually be a multi-page table so should send multiple pages to the end of the report, prompting the llm that the ccris_detail_table ends when you see 'special attention account', 'credit application', 'remark legend'.
             self.extract_using_image('ccris_detail')
 
             util_keys = ['total_outstanding_balance_0', 'total_outstanding_balance_1', 'total_limit_0', 'total_limit_1']
