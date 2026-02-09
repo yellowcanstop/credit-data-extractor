@@ -42,11 +42,6 @@ def run(input: Request) -> Dict:
     data = document_extractor.extract_using_doc_intelligence(
         blob_content,
         DocumentDataExtractorOptions(
-            extraction_prompt="""Extract the data from this report.
-    - If a value is not present, provide null.
-    - It is possible that there are multiple reports in the same document across multiple pages.
-    - Some values must be inferred based on the content defined in the report.
-    - Dates should be in the format YYYY-MM-DD.""",
             page_start=input.page_range_start,
             page_end=input.page_range_end,
             doc_intelligence_endpoint=app_settings.azure_aiservices_endpoint,

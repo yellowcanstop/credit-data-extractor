@@ -32,10 +32,9 @@ ExtractionConfidenceResult = ConfidenceResult[ResponseFormatT | None]
 class DocumentDataExtractorOptions:
     """Defines the configuration options for extracting data from a document using Azure OpenAI."""
 
-    def __init__(self, extraction_prompt: str, page_start: Optional[int], page_end: Optional[int], doc_intelligence_endpoint: str, openai_endpoint: str, deployment_name: str, max_tokens: int = 4096, temperature: float = 0.1, top_p: float = 0.1):
+    def __init__(self, page_start: Optional[int], page_end: Optional[int], doc_intelligence_endpoint: str, openai_endpoint: str, deployment_name: str, max_tokens: int = 4096, temperature: float = 0.1, top_p: float = 0.1):
         """Initializes a new instance of the DocumentDataExtractorOptions class.
 
-        :param extraction_prompt: The prompt to use for extracting data from the document, including the expected output format.
         :param page_start: The starting page number of the document to extract data from.
         :param page_end: The ending page number of the document to extract data from.
         :param doc_intelligence_endpoint: The Azure Document Intelligence endpoint to use for the request.
@@ -46,8 +45,7 @@ class DocumentDataExtractorOptions:
         :param top_p: The nucleus sampling parameter for the model. Default is 0.1.
         """
 
-        self.system_prompt = f"""You are an AI assistant that extracts data from documents."""
-        self.extraction_prompt = extraction_prompt
+        self.system_prompt = f"""You are an AI assistant that extracts data from specified tables in documents."""
         self.page_start = page_start
         self.page_end = page_end
         self.openai_endpoint = openai_endpoint
@@ -118,7 +116,7 @@ class DocumentDataExtractor:
         user_content = []
         user_content.append({
             "type": "text",
-            "text": options.extraction_prompt
+            "text": "placeholder"
         })
 
         if document_markdown:
@@ -1050,7 +1048,71 @@ class DocumentDataExtractor:
 
                 if (parsed_data.get('financial_report_date') is None) or (parsed_data.get('turnover') is None) or (parsed_data.get('net_profit') is None) or (parsed_data.get('retained_profit') is None) or (parsed_data.get('net_worth') is None) or (parsed_data.get('net_current_assets') is None) or (parsed_data.get('current_ratio') is None) or (parsed_data.get('gearing_ratio') is None):
                     logger.info("Financial statements data incomplete from table extraction, falling back to image extraction")
-                    self.extract_using_image('financial_statements')
+                    image_data = self.extract_using_image('financial_statements')
+
+                    if image_data:
+                        if parsed_data.get('financial_report_date') is None and image_data.get('financial_year_end') is not None:
+                            parsed_data['financial_report_date'] = image_data['financial_year_end']
+                        else:
+                            logger.error("Financial report date not found in image extraction")
+
+                        if parsed_data.get('turnover') is None and image_data.get('revenue') is not None:
+                            parsed_data['turnover'] = self.__str_to_decimal__(self.__normalize_numeric_str__(image_data['revenue']))
+                        else:
+                            logger.error("Turnover not found in image extraction")
+                        
+                        if parsed_data.get('net_profit') is None and image_data.get('profit_after_tax') is not None:
+                            parsed_data['net_profit'] = self.__str_to_decimal__(self.__normalize_numeric_str__(image_data['profit_after_tax']))
+                        else:
+                            logger.error("Net profit not found in image extraction")
+                        
+                        if parsed_data.get('retained_profit') is None and image_data.get('retained_earning') is not None:
+                            parsed_data['retained_profit'] = self.__str_to_decimal__(self.__normalize_numeric_str__(image_data['retained_earning']))
+                        else:
+                            logger.error("Retained profit not found in image extraction")
+                        
+                        if parsed_data.get('net_worth') is None and image_data.get('net_worth') is not None:
+                            parsed_data['net_worth'] = self.__str_to_decimal__(self.__normalize_numeric_str__(image_data['net_worth']))
+                        else:
+                            logger.error("Net worth not found in image extraction")
+                        
+                        if parsed_data.get('net_current_assets') is None:
+                            fs_key = ['current_assets', 'current_liabilities', 'non_current_assets', 'total_assets', 'non_current_liabilities', 'long_term_liabilities', 'total_liabilities']
+                            if all(image_data.get(key) is not None for key in fs_key):
+                                nca = self.__str_to_decimal__(self.__normalize_numeric_str__(image_data['non_current_assets']))
+                                ca = self.__str_to_decimal__(self.__normalize_numeric_str__(image_data['current_assets']))
+                                ta = self.__str_to_decimal__(self.__normalize_numeric_str__(image_data['total_assets']))
+                                ncl = self.__str_to_decimal__(self.__normalize_numeric_str__(image_data['non_current_liabilities']))
+                                cl = self.__str_to_decimal__(self.__normalize_numeric_str__(image_data['current_liabilities']))
+                                ltl = self.__str_to_decimal__(self.__normalize_numeric_str__(image_data['long_term_liabilities']))
+                                tl = self.__str_to_decimal__(self.__normalize_numeric_str__(image_data['total_liabilities']))
+                                valid_ca_cl = (ta == nca + ca) and (tl == ncl + cl + ltl)
+                                if valid_ca_cl:
+                                    parsed_data['net_current_assets'] = ca - cl
+                                else:
+                                    logger.error("Current assets and liabilities validation failed in image extraction")
+                        
+                        if parsed_data.get('current_ratio') is None and image_data.get('current_ratio') is not None:
+                            extracted_cr = self.__str_to_decimal__(image_data['current_ratio'])
+                            ca = self.__str_to_decimal__(self.__normalize_numeric_str__(image_data['current_assets']))
+                            cl = self.__str_to_decimal__(self.__normalize_numeric_str__(image_data['current_liabilities']))
+                            cr = ca / cl if cl > 0 else Decimal(0)
+                            if abs(cr - extracted_cr) < Decimal('0.01'):
+                                parsed_data['current_ratio'] = extracted_cr
+                            else:
+                                logger.error("Current ratio validation failed in image extraction")
+                        
+                        if parsed_data.get('gearing_ratio') is None and image_data.get('gearing_ratio') is not None and image_data.get('net_worth') is not None and image_data.get('total_liabilities') is not None:
+                            tl = self.__str_to_decimal__(self.__normalize_numeric_str__(image_data['total_liabilities']))
+                            nw = self.__str_to_decimal__(self.__normalize_numeric_str__(image_data['net_worth']))
+                            calculated_gr = tl / nw if nw > 0 else Decimal(0)
+                            extracted_gr = self.__str_to_decimal__(self.__normalize_numeric_str__(image_data['gearing_ratio']))
+                            valid_gr = (abs(extracted_gr - calculated_gr) < Decimal('0.01'))
+                            if valid_gr:
+                                parsed_data['gearing_ratio'] = extracted_gr
+                            else:
+                                logger.error("Gearing ratio validation failed in image extraction")
+
                 
                 # DEBUG. CHECK WHICH KEYS ARE NOT PRESENT
                 for key in ['paid_up_capital', 'financial_report_date', 'turnover', 'net_profit', 'retained_profit', 'net_worth', 'net_current_assets', 'current_ratio', 'gearing_ratio']:
@@ -1059,16 +1121,24 @@ class DocumentDataExtractor:
 
         return parsed_data   
     
-    def extract_using_image(self, key: str):
+    def extract_using_image(self, table_tag: str):
+        """Extract data from images of document pages where the specified table is located."""
         client = self.__get_openai_client__(self.options)
-        page_start, page_end = self.document_key_page_ranges.get(key, (1, 1))
+
+        page_start, page_end = self.__get_page_range_for_table_tag__(table_tag)
+
+        if page_start is None or page_end is None:
+            page_start, page_end = 1, len(self.result.pages)
+
         image_uris = self.__get_document_image_uris__(
             self.bytes, page_start, page_end)
+        
+        table_prompt = self.__get_prompt_for_table_tag__(table_tag)
         
         user_content = []
         user_content.append({
             "type": "text",
-            "text": f"Extract the following information from the images between pages {page_start} and {page_end} of the document: {key}."
+            "text": table_prompt
         })
 
         for image_uri in image_uris:
@@ -1101,8 +1171,41 @@ class DocumentDataExtractor:
 
         response_obj = completion.choices[0].message.parsed
         response_obj_dict = response_obj.model_dump()
+        return response_obj_dict
 
-        
+    def __get_prompt_for_table_tag__(self, table_tag: str) -> str:
+        """Returns the prompt string for a given table tag."""
+        match table_tag:
+            case 'ccris_summary':
+                pass
+            case 'ccris_detail':
+                pass
+            case 'credit_info_at_a_glance':
+                pass
+            case 'snapshot':
+                pass
+            case 'financials_and_shareholders':
+                pass
+            case 'financial_statements':
+                return (
+                    "Attached are images of financial statements of a company. Each financial statement is a table. " 
+                    "Each table has six columns, with the first column being the financial item and the second column being the value for the latest financial year. "
+                    "We are only interested in the values for the latest financial year in the second column. "
+                    "Extract the following fields for the latest financial year (second column) from the tables, only if these exact fields are present. "
+                    "From the header, extract 'financial year end' in YYYY-MM-DD format. "
+                    "From the balance sheet, extract 'non-current assets', 'current assets', 'total assets', 'non-current liabilities', 'current liabilities', 'long term liabilities', 'total liabilities'. "
+                    "From the income statement, extract 'revenue', 'profit / (loss) after tax'. "
+                    "From the liquidity ratios, extract 'current ratio'. "
+                    "From the leverage ratios, extract 'gearing ratio' and 'debt to equity ratio [%]'. "
+                    "The values are in two decimal places. Brackets surrounding a value indicates that the value is negative. "
+                    "Ignore asterisks around values if present. "
+                    "Due to OCR errors, some commas may be represented as periods, and vice versa. Always treat the right-most separator as the decimal point if ambiguous. "
+                    "If any of these fields are not present in the tables, return null for that field. "
+                    "Return the extracted data in the following JSON format: "
+                    "{\"financial_year_end\": value or null, \"non_current_assets\": value or null, \"current_assets\": value or null, \"total_assets\": value or null, \"non_current_liabilities\": value or null, \"current_liabilities\": value or null, \"long_term_liabilities\": value or null, \"total_liabilities\": value or null, \"revenue\": value or null, \"profit_after_tax\": value or null, \"current_ratio\": value or null, \"gearing_ratio\": value or null, \"debt_to_equity_ratio\": value or null}."
+                )
+            case _:
+                raise ValueError(f"Unknown table tag: {table_tag}")
 
     def __reformat_date__(self, date_str: str) -> str:
         """Reformats date string DD-MM-YYYY to YYYY-MM-DD."""
