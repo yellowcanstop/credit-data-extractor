@@ -232,9 +232,20 @@ class DocumentDataExtractor:
         return {k: float(v) if isinstance(v, Decimal) else v for k, v in parsed_data.items()}
     
     def __normalize_numeric_str__(self, value: str) -> str:
-        """Normalizes a numeric string to handle OCR errors where commas are misread as periods.
-        E.g., '2,091.202.00' -> '2091202.00', '2,091,202.00' -> '2091202.00'"""
-        stripped = value.replace(',', '')
+        """Normalizes a numeric string to handle OCR errors.
+        Handles cases where:
+        - Commas are used as thousand separators: '2,091,202.00' -> '2091202.00'
+        - Commas are misread as periods: '2,091.202.00' -> '2091202.00'
+        - Comma is used as decimal separator (European format): '1,22' -> '1.22'
+        """
+        # Handle nil/dash values first
+        stripped = value.strip()
+        if stripped == '-' or stripped == '–' or stripped == '—':
+            return '0'
+        
+        # Remove all commas first (they're either thousand separators or OCR errors)
+        stripped = stripped.replace(',', '')
+        
         parts = stripped.split('.')
         if len(parts) <= 2:
             return stripped
@@ -256,17 +267,17 @@ class DocumentDataExtractor:
             if idx + 1 >= num_paragraphs:
                 continue
             
-            if self.__is_fuzzy_match__(para_text, 'c1: banking payment records (source: ccris, bank negara malaysia)', threshold=100):
+            if self.__is_fuzzy_match__(para_text, 'c1: banking payment records (source: ccris, bank negara malaysia)'):
                 ccris = self.result.paragraphs[idx + 1].content.strip().lower()
-                if ccris and self.__is_fuzzy_match__(ccris, 'a check with bank negara malaysia returned no result on subject'):
+                if ccris and self.__is_fuzzy_match__(ccris, 'a check with bank negara malaysia returned no result on subject', 95):
                     relevant_paras['ccris_not_available'] = idx
             if self.__is_fuzzy_match__(para_text, 'd1: legal cases (subject as defendant)'):
                 defendant = self.result.paragraphs[idx + 1].content.strip().lower()
-                if defendant and self.__is_fuzzy_match__(defendant, 'no information available'):
+                if defendant and self.__is_fuzzy_match__(defendant, 'no information available', 95):
                     relevant_paras['legal_defendant_none'] = idx
             if self.__is_fuzzy_match__(para_text, 'd2: legal cases (subject as plaintiff)'):
                 plaintiff = self.result.paragraphs[idx + 1].content.strip().lower()
-                if plaintiff and self.__is_fuzzy_match__(plaintiff, 'no information available'):
+                if plaintiff and self.__is_fuzzy_match__(plaintiff, 'no information available', 95):
                     relevant_paras['legal_plaintiff_none'] = idx
         return relevant_paras
         
@@ -713,7 +724,7 @@ class DocumentDataExtractor:
                     if val is not None:
                         extracted_values['msic'] = " ".join(val.splitlines())
 
-                if self.__is_fuzzy_match__(row_key_text, 'type') and (self.__is_fuzzy_match__(row_key_text, 'business commenced') or self.__is_fuzzy_match__(row_key_text, 'last changed date') or self.__is_fuzzy_match__(row_key_text, 'rob search date') or self.__is_fuzzy_match__(row_key_text, 'current registration expiry date')):
+                if self.__is_fuzzy_match__(row_key_text, 'business commenced') or self.__is_fuzzy_match__(row_key_text, 'last changed date') or self.__is_fuzzy_match__(row_key_text, 'rob search date') or self.__is_fuzzy_match__(row_key_text, 'current registration expiry date'):
                     self.relevant_paras['partnership'] = r_idx
         
         elif table_type == 'FINANCIALS_AND_SHAREHOLDERS':
@@ -740,37 +751,37 @@ class DocumentDataExtractor:
                     if val is not None:
                         extracted_values['financial_year_end'] = val
                 
-                if self.__is_fuzzy_match__(row_key_text, 'non-current assets', 95):
+                if self.__is_fuzzy_match__(row_key_text, 'non-current assets', 100):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['non_current_assets'] = val
                     
-                if self.__is_fuzzy_match__(row_key_text, 'current assets', 95):
+                if self.__is_fuzzy_match__(row_key_text, 'current assets', 100):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['current_assets'] = val
                     
-                if self.__is_fuzzy_match__(row_key_text, 'total assets', 95):
+                if self.__is_fuzzy_match__(row_key_text, 'total assets', 100):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['total_assets'] = val
 
-                if self.__is_fuzzy_match__(row_key_text, 'non-current liabilities', 95):
+                if self.__is_fuzzy_match__(row_key_text, 'non-current liabilities', 100):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['non_current_liabilities'] = val
                 
-                if self.__is_fuzzy_match__(row_key_text, 'current liabilities', 95):
+                if self.__is_fuzzy_match__(row_key_text, 'current liabilities', 100):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['current_liabilities'] = val
                 
-                if self.__is_fuzzy_match__(row_key_text, 'long term liabilities', 95):
+                if self.__is_fuzzy_match__(row_key_text, 'long term liabilities', 100):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['long_term_liabilities'] = val
                 
-                if self.__is_fuzzy_match__(row_key_text, 'total liabilities', 95):
+                if self.__is_fuzzy_match__(row_key_text, 'total liabilities', 100):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['total_liabilities'] = val
@@ -964,13 +975,13 @@ class DocumentDataExtractor:
 
                 fs_key = ['current_assets', 'current_liabilities', 'non_current_assets', 'total_assets', 'non_current_liabilities', 'long_term_liabilities', 'total_liabilities']
                 if all(extracted_data.get(key) is not None for key in fs_key):
-                    nca = self.__str_to_decimal__(extracted_data['non_current_assets'])
-                    ca = self.__str_to_decimal__(extracted_data['current_assets'])
-                    ta = self.__str_to_decimal__(extracted_data['total_assets'])
-                    ncl = self.__str_to_decimal__(extracted_data['non_current_liabilities'])
-                    cl = self.__str_to_decimal__(extracted_data['current_liabilities'])
-                    ltl = self.__str_to_decimal__(extracted_data['long_term_liabilities'])
-                    tl = self.__str_to_decimal__(extracted_data['total_liabilities'])
+                    nca = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['non_current_assets']))
+                    ca = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['current_assets']))
+                    ta = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['total_assets']))
+                    ncl = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['non_current_liabilities']))
+                    cl = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['current_liabilities']))
+                    ltl = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['long_term_liabilities']))
+                    tl = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['total_liabilities']))
 
                     valid_ca_cl = (ta == nca + ca) and (tl == ncl + cl + ltl)
                     if valid_ca_cl:
@@ -983,11 +994,11 @@ class DocumentDataExtractor:
 
                 bal_key = ['gearing_ratio', 'debt_to_equity_ratio', 'net_worth', 'total_liabilities']
                 if all(extracted_data.get(key) is not None for key in bal_key):
-                    tl = self.__str_to_decimal__(extracted_data['total_liabilities'])
-                    nw = self.__str_to_decimal__(extracted_data['net_worth'])
+                    tl = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['total_liabilities']))
+                    nw = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['net_worth']))
                     calculated_gr = tl / nw if nw > 0 else Decimal(0)
-                    extracted_gr = self.__str_to_decimal__(extracted_data['gearing_ratio'])
-                    extracted_der = self.__str_to_decimal__(extracted_data['debt_to_equity_ratio'])
+                    extracted_gr = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['gearing_ratio']))
+                    extracted_der = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['debt_to_equity_ratio']))
                     valid_gr = (abs(extracted_gr - extracted_der) < Decimal('0.01')) and (abs(extracted_gr - calculated_gr) < Decimal('0.01'))
                     if valid_gr:
                         parsed_data['gearing_ratio'] = extracted_gr
@@ -1027,6 +1038,36 @@ class DocumentDataExtractor:
             return years_elapsed
         except ValueError:
             return 0
+    
+    def __str_to_decimal__(self, value: str) -> Decimal:
+        """Converts a string representation of a number to Decimal, handling commas, spaces, and special characters."""
+        try:
+            # Handle nil/dash values
+            stripped = value.strip()
+            if stripped == '-' or stripped == '–' or stripped == '—' or stripped == '':
+                return Decimal(0)
+            
+            clean_value = stripped.replace(',', '.').replace(' ', '').replace('%', '').replace('*', '')
+            
+            # Handle multiple periods (OCR errors)
+            parts = clean_value.split('.')
+            if len(parts) > 2:
+                clean_value = ''.join(parts[:-1]) + '.' + parts[-1]
+            
+            if not clean_value:
+                logger.warning("Empty value passed to __str_to_decimal__")
+                return Decimal(0)
+            if clean_value.startswith('(') and clean_value.endswith(')'):
+                clean_value = '-' + clean_value[1:-1]
+
+            result = Decimal(clean_value)
+            
+            if '%' in value:
+                return result / 100
+            return result
+        except (InvalidOperation, AttributeError) as e:
+            logger.warning("Failed to parse '%s' as Decimal: %s", value, e)
+            return Decimal(0)
         
     def __str_to_decimal__(self, value: str) -> Decimal:
         """Converts a string representation of a number to Decimal, handling commas and spaces."""
