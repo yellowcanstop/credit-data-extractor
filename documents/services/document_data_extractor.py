@@ -268,15 +268,15 @@ class DocumentDataExtractor:
                 continue
             
             if self.__is_fuzzy_match__(para_text, 'c1: banking payment records (source: ccris, bank negara malaysia)'):
-                ccris = self.result.paragraphs[idx + 1].content.strip().lower()
+                ccris = self.__find_paragraph_below_paragraph__(para, self.result.paragraphs)
                 if ccris and self.__is_fuzzy_match__(ccris, 'a check with bank negara malaysia returned no result on subject', 95):
                     relevant_paras['ccris_not_available'] = idx
             if self.__is_fuzzy_match__(para_text, 'd1: legal cases (subject as defendant)'):
-                defendant = self.result.paragraphs[idx + 1].content.strip().lower()
+                defendant = self.__find_paragraph_below_paragraph__(para, self.result.paragraphs)
                 if defendant and self.__is_fuzzy_match__(defendant, 'no information available', 95):
                     relevant_paras['legal_defendant_none'] = idx
             if self.__is_fuzzy_match__(para_text, 'd2: legal cases (subject as plaintiff)'):
-                plaintiff = self.result.paragraphs[idx + 1].content.strip().lower()
+                plaintiff = self.__find_paragraph_below_paragraph__(para, self.result.paragraphs)
                 if plaintiff and self.__is_fuzzy_match__(plaintiff, 'no information available', 95):
                     relevant_paras['legal_plaintiff_none'] = idx
         return relevant_paras
@@ -320,6 +320,35 @@ class DocumentDataExtractor:
         
         logger.info("Tagged %d tables after processing", len(tagged_tables))
         return tagged_tables
+
+    def __find_paragraph_below_paragraph__(self, paragraph, paragraphs) -> Optional[str]:
+        """Finds the paragraph immediately below a given paragraph."""
+        if not paragraph or not paragraphs:
+            return None
+        
+        para_page = paragraph.bounding_regions[0].page_number if paragraph.bounding_regions else None
+        para_bottom = paragraph.bounding_regions[0].polygon[5] if paragraph.bounding_regions else None  # Y-coordinate of bottom-left
+        
+        # Find paragraphs on same page that start after this paragraph ends
+        candidates = []
+        for para in paragraphs:
+            if not para.bounding_regions:
+                continue
+            
+            para_region = para.bounding_regions[0]
+            if para_region.page_number == para_page:
+                para_top = para_region.polygon[1]  # Y-coordinate of top-left
+                # If the paragraph is within 0.5 inches below the given paragraph
+                if 0 < (para_top - para_bottom) < 0.5: 
+                    candidates.append((para_top, para.content))
+        
+        # Return the closest following heading
+        if candidates:
+            candidates.sort()  # Closest first
+            val = candidates[0][1]
+            return val.strip().lower()
+        
+        return None
 
     def __find_missing_header__(self, table_region, paragraphs) -> Optional[str]:
         """Finds the paragraph immediately before a table using bounding regions."""
@@ -709,12 +738,13 @@ class DocumentDataExtractor:
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['registration_date'] = val
-
-                if self.__is_fuzzy_match__(row_key_text, 'type of company'):
+                
+                if self.__is_fuzzy_match__(row_key_text, 'type'):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['type'] = " ".join(val.splitlines())
-                elif self.__is_fuzzy_match__(row_key_text, 'type'):
+                
+                if self.__is_fuzzy_match__(row_key_text, 'type of company'):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['type'] = " ".join(val.splitlines())
@@ -751,37 +781,37 @@ class DocumentDataExtractor:
                     if val is not None:
                         extracted_values['financial_year_end'] = val
                 
-                if self.__is_fuzzy_match__(row_key_text, 'non-current assets', 100):
+                if self.__is_fuzzy_match__(row_key_text, 'non-current assets', 95):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['non_current_assets'] = val
                     
-                if self.__is_fuzzy_match__(row_key_text, 'current assets', 100):
+                if self.__is_fuzzy_match__(row_key_text, 'current assets', 95):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['current_assets'] = val
                     
-                if self.__is_fuzzy_match__(row_key_text, 'total assets', 100):
+                if self.__is_fuzzy_match__(row_key_text, 'total assets', 95):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['total_assets'] = val
 
-                if self.__is_fuzzy_match__(row_key_text, 'non-current liabilities', 100):
+                if self.__is_fuzzy_match__(row_key_text, 'non-current liabilities', 95):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['non_current_liabilities'] = val
                 
-                if self.__is_fuzzy_match__(row_key_text, 'current liabilities', 100):
+                if self.__is_fuzzy_match__(row_key_text, 'current liabilities', 95):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['current_liabilities'] = val
                 
-                if self.__is_fuzzy_match__(row_key_text, 'long term liabilities', 100):
+                if self.__is_fuzzy_match__(row_key_text, 'long term liabilities', 95):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['long_term_liabilities'] = val
                 
-                if self.__is_fuzzy_match__(row_key_text, 'total liabilities', 100):
+                if self.__is_fuzzy_match__(row_key_text, 'total liabilities', 95):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['total_liabilities'] = val
@@ -806,17 +836,17 @@ class DocumentDataExtractor:
                     if val is not None:
                         extracted_values['profit_after_tax_1'] = val
 
-                if self.__is_fuzzy_match__(row_key_text, 'current ratio', 95):
+                if self.__is_fuzzy_match__(row_key_text, 'current ratio'):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['current_ratio'] = val
 
-                if self.__is_fuzzy_match__(row_key_text, 'gearing ratio', 95):
+                if self.__is_fuzzy_match__(row_key_text, 'gearing ratio'):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['gearing_ratio'] = val
 
-                if self.__is_fuzzy_match__(row_key_text, 'debt to equity ratio [%]', 95):
+                if self.__is_fuzzy_match__(row_key_text, 'debt to equity ratio [%]'):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['debt_to_equity_ratio'] = val
