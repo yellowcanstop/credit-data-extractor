@@ -338,7 +338,7 @@ class DocumentDataExtractor:
         
         return None
 
-    def __is_fuzzy_match__(self, a: str, b: str, threshold: int = 85) -> bool:
+    def __is_fuzzy_match__(self, a: str, b: str, threshold: int = 90) -> bool:
         """Checks if two strings are a fuzzy match above the given threshold."""
         return fuzz.partial_ratio(a.strip().lower(), b.strip().lower()) > threshold
     
@@ -508,7 +508,8 @@ class DocumentDataExtractor:
                     val = self.__safe_get_cell__(table, r_idx, 2)
                     if val is not None:
                         extracted_values['legal_non_personal'] = val
-                elif self.__is_fuzzy_match__(row_key_text, 'legal records in past 24 months (personal capacity)'):
+                
+                if self.__is_fuzzy_match__(row_key_text, 'legal records in past 24 months (personal capacity)'):
                     val = self.__safe_get_cell__(table, r_idx, 2)
                     if val is not None:
                         extracted_values['legal_personal'] = val
@@ -653,7 +654,8 @@ class DocumentDataExtractor:
                         extracted_values['legal_non_personal_entity'] = val2
                     if val3 is not None:
                         extracted_values['legal_non_personal_rp'] = val3
-                elif self.__is_fuzzy_match__(row_key_text, 'legal records in past 24 months (personal capacity)'):
+                
+                if self.__is_fuzzy_match__(row_key_text, 'legal records in past 24 months (personal capacity)'):
                     val2 = self.__safe_get_cell__(table, r_idx, 2)
                     val3 = self.__safe_get_cell__(table, r_idx, 3)
                     if val2 is not None:
@@ -743,12 +745,12 @@ class DocumentDataExtractor:
                     if val is not None:
                         extracted_values['non_current_assets'] = val
                     
-                elif self.__is_fuzzy_match__(row_key_text, 'current assets'):
+                if self.__is_fuzzy_match__(row_key_text, 'current assets'):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['current_assets'] = val
                     
-                elif self.__is_fuzzy_match__(row_key_text, 'total assets'):
+                if self.__is_fuzzy_match__(row_key_text, 'total assets'):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['total_assets'] = val
@@ -757,15 +759,18 @@ class DocumentDataExtractor:
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['non_current_liabilities'] = val
-                elif self.__is_fuzzy_match__(row_key_text, 'current liabilities'):
+                
+                if self.__is_fuzzy_match__(row_key_text, 'current liabilities'):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['current_liabilities'] = val
-                elif self.__is_fuzzy_match__(row_key_text, 'long term liabilities'):
+                
+                if self.__is_fuzzy_match__(row_key_text, 'long term liabilities'):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['long_term_liabilities'] = val
-                elif self.__is_fuzzy_match__(row_key_text, 'total liabilities'):
+                
+                if self.__is_fuzzy_match__(row_key_text, 'total liabilities'):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['total_liabilities'] = val
@@ -897,6 +902,11 @@ class DocumentDataExtractor:
                 logger.info("Special attention accounts or legal cases not found from table extraction, falling back to image extraction")
                 self.extract_using_image('credit_info_at_a_glance')
 
+            # DEBUG. CHECK WHICH KEYS ARE NOT PRESENT
+            for key in ['special_attention_accounts', 'legal_cases', 'utilisation', 'repayment_to_banks']:
+                if parsed_data.get(key) is None:
+                    logger.error("Key %s not found in parsed data", key)
+
             # TODO check blacklist
 
             if extracted_data.get('registration_date') is not None:
@@ -915,6 +925,11 @@ class DocumentDataExtractor:
             if parsed_data.get('years_in_business') is None or parsed_data.get('type_of_company') is None or parsed_data.get('nature_of_business') is None:
                 logger.info("Snapshot data incomplete from table extraction, falling back to image extraction")
                 self.extract_using_image('snapshot')
+
+            # DEBUG. CHECK WHICH KEYS ARE NOT PRESENT
+            for key in ['years_in_business', 'type_of_company', 'nature_of_business']:
+                if parsed_data.get(key) is None:
+                    logger.error("Key %s not found in parsed data", key)
 
             if self.relevant_paras.get('partnership') is not None and parsed_data.get('type_of_company') == 'Non - Sdn Bhd':
                 parsed_data['paid_up_capital'] = 'N/A'
@@ -984,6 +999,11 @@ class DocumentDataExtractor:
                 if (parsed_data.get('financial_report_date') is None) or (parsed_data.get('turnover') is None) or (parsed_data.get('net_profit') is None) or (parsed_data.get('retained_profit') is None) or (parsed_data.get('net_worth') is None) or (parsed_data.get('net_current_assets') is None) or (parsed_data.get('current_ratio') is None) or (parsed_data.get('gearing_ratio') is None):
                     logger.info("Financial statements data incomplete from table extraction, falling back to image extraction")
                     self.extract_using_image('financial_statements')
+                
+                # DEBUG. CHECK WHICH KEYS ARE NOT PRESENT
+                for key in ['paid_up_capital', 'financial_report_date', 'turnover', 'net_profit', 'retained_profit', 'net_worth', 'net_current_assets', 'current_ratio', 'gearing_ratio']:
+                    if parsed_data.get(key) is None:
+                        logger.error("Key %s not found in parsed data", key)
 
         return parsed_data   
     
@@ -1056,6 +1076,7 @@ class DocumentDataExtractor:
                         high_non_zeroes += 1
                     else:
                         non_zeroes -= 1
+                        digits -= 1  # invalid character, do not count
         if digits == zeroes or ((non_zeroes / digits) < 0.2 and non_zeroes == ones):
             return 'Satisfactory'
         elif (non_zeroes / digits) < 0.3 and non_zeroes == (ones + twos):
