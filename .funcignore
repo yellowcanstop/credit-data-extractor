@@ -3,6 +3,7 @@
 __azurite_db*__.json
 __blobstorage__
 __queuestorage__
+AzuriteConfig
 local.settings.json
 test
 .venv
