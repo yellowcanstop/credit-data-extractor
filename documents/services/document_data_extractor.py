@@ -71,6 +71,8 @@ class DocumentDataExtractor:
         self.result: AnalyzeResult = None
         self.report_type: ReportType = None
         self.relevant_paras: Dict[str, int] = {}
+        self.options: DocumentDataExtractorOptions = None
+        self.bytes: bytes = None
 
     def __safe_get_cell__(self, table, r_idx: int, c_idx: int) -> Optional[str]:
         """Safely gets and strips a cell value from a table row, returning None if the cell doesn't exist."""
@@ -183,6 +185,8 @@ class DocumentDataExtractor:
         logger.info("Starting extraction, document size: %d bytes", len(document_bytes))
         
         try:
+            self.options = options
+            self.bytes = document_bytes
             di_client = self.__get_document_intelligence_client__(options)
         except Exception as e:
             logger.error("Failed to create Document Intelligence client: %s", e, exc_info=True)
@@ -1056,7 +1060,49 @@ class DocumentDataExtractor:
         return parsed_data   
     
     def extract_using_image(self, key: str):
-        pass
+        client = self.__get_openai_client__(self.options)
+        page_start, page_end = self.document_key_page_ranges.get(key, (1, 1))
+        image_uris = self.__get_document_image_uris__(
+            self.bytes, page_start, page_end)
+        
+        user_content = []
+        user_content.append({
+            "type": "text",
+            "text": f"Extract the following information from the images between pages {page_start} and {page_end} of the document: {key}."
+        })
+
+        for image_uri in image_uris:
+            user_content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": image_uri
+                }
+            })
+        
+        completion = client.beta.chat.completions.parse(
+            model=self.options.deployment_name,
+            messages=[
+                {
+                    "role": "system",
+                    "content": self.options.system_prompt,
+                },
+                {
+                    "role": "user",
+                    "content": user_content
+                }
+            ],
+            response_format=self.options.response_format,
+            max_tokens=self.options.max_tokens,
+            temperature=self.options.temperature,
+            top_p=self.options.top_p,
+            # Enabled to determine the confidence of the response.
+            logprobs=True
+        )
+
+        response_obj = completion.choices[0].message.parsed
+        response_obj_dict = response_obj.model_dump()
+
+        
 
     def __reformat_date__(self, date_str: str) -> str:
         """Reformats date string DD-MM-YYYY to YYYY-MM-DD."""
