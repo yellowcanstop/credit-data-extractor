@@ -256,7 +256,7 @@ class DocumentDataExtractor:
             if idx + 1 >= num_paragraphs:
                 continue
             
-            if self.__is_fuzzy_match__(para_text, 'c1: banking payment records (source: ccris, bank negara malaysia)'):
+            if self.__is_fuzzy_match__(para_text, 'c1: banking payment records (source: ccris, bank negara malaysia)', threshold=100):
                 ccris = self.result.paragraphs[idx + 1].content.strip().lower()
                 if ccris and self.__is_fuzzy_match__(ccris, 'a check with bank negara malaysia returned no result on subject'):
                     relevant_paras['ccris_not_available'] = idx
@@ -849,10 +849,12 @@ class DocumentDataExtractor:
 
             # use ai as fallback. this needs to be async
             if parsed_data.get('utilisation') is None:
+                logger.info("Utilisation not found from table extraction, falling back to image extraction")
                 self.extract_using_image('ccris_summary')
                 # update utilisation, special attention, legal
 
             if (parsed_data.get('special_attention_accounts') is None) or (parsed_data.get('legal_cases') is None):
+                logger.info("Special attention accounts or legal cases not found from table extraction, falling back to image extraction")
                 self.extract_using_image('credit_info_at_a_glance')
             
         elif self.report_type == ReportType.COMPANY:
@@ -877,6 +879,7 @@ class DocumentDataExtractor:
                             parsed_data['utilisation'] = utilisation
 
                 if parsed_data.get('utilisation') is None:
+                    logger.info("Utilisation not found from table extraction, falling back to image extraction")
                     self.extract_using_image('ccris_summary')
 
             if extracted_data.get('special_attention_accounts_entity') is not None:
@@ -891,6 +894,7 @@ class DocumentDataExtractor:
                     parsed_data['legal_cases'] = np + p
 
             if (parsed_data.get('special_attention_accounts') is None) or (parsed_data.get('legal_cases') is None):
+                logger.info("Special attention accounts or legal cases not found from table extraction, falling back to image extraction")
                 self.extract_using_image('credit_info_at_a_glance')
 
             # TODO check blacklist
@@ -909,6 +913,7 @@ class DocumentDataExtractor:
                 parsed_data['nature_of_business'] = extracted_data['msic']
             
             if parsed_data.get('years_in_business') is None or parsed_data.get('type_of_company') is None or parsed_data.get('nature_of_business') is None:
+                logger.info("Snapshot data incomplete from table extraction, falling back to image extraction")
                 self.extract_using_image('snapshot')
 
             if self.relevant_paras.get('partnership') is not None and parsed_data.get('type_of_company') == 'Non - Sdn Bhd':
@@ -973,9 +978,11 @@ class DocumentDataExtractor:
                         parsed_data['gearing_ratio'] = extracted_gr
                 
                 if parsed_data.get('paid_up_capital') is None:
+                    logger.info("Paid up capital not found from table extraction, falling back to image extraction")
                     self.extract_using_image('financials_and_shareholders')
 
                 if (parsed_data.get('financial_report_date') is None) or (parsed_data.get('turnover') is None) or (parsed_data.get('net_profit') is None) or (parsed_data.get('retained_profit') is None) or (parsed_data.get('net_worth') is None) or (parsed_data.get('net_current_assets') is None) or (parsed_data.get('current_ratio') is None) or (parsed_data.get('gearing_ratio') is None):
+                    logger.info("Financial statements data incomplete from table extraction, falling back to image extraction")
                     self.extract_using_image('financial_statements')
 
         return parsed_data   
