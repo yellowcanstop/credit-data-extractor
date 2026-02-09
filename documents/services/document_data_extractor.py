@@ -740,37 +740,37 @@ class DocumentDataExtractor:
                     if val is not None:
                         extracted_values['financial_year_end'] = val
                 
-                if self.__is_fuzzy_match__(row_key_text, 'non-current assets'):
+                if self.__is_fuzzy_match__(row_key_text, 'non-current assets', 95):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['non_current_assets'] = val
                     
-                if self.__is_fuzzy_match__(row_key_text, 'current assets'):
+                if self.__is_fuzzy_match__(row_key_text, 'current assets', 95):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['current_assets'] = val
                     
-                if self.__is_fuzzy_match__(row_key_text, 'total assets'):
+                if self.__is_fuzzy_match__(row_key_text, 'total assets', 95):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['total_assets'] = val
 
-                if self.__is_fuzzy_match__(row_key_text, 'non-current liabilities'):
+                if self.__is_fuzzy_match__(row_key_text, 'non-current liabilities', 95):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['non_current_liabilities'] = val
                 
-                if self.__is_fuzzy_match__(row_key_text, 'current liabilities'):
+                if self.__is_fuzzy_match__(row_key_text, 'current liabilities', 95):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['current_liabilities'] = val
                 
-                if self.__is_fuzzy_match__(row_key_text, 'long term liabilities'):
+                if self.__is_fuzzy_match__(row_key_text, 'long term liabilities', 95):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['long_term_liabilities'] = val
                 
-                if self.__is_fuzzy_match__(row_key_text, 'total liabilities'):
+                if self.__is_fuzzy_match__(row_key_text, 'total liabilities', 95):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['total_liabilities'] = val
@@ -795,17 +795,17 @@ class DocumentDataExtractor:
                     if val is not None:
                         extracted_values['profit_after_tax_1'] = val
 
-                if self.__is_fuzzy_match__(row_key_text, 'current ratio'):
+                if self.__is_fuzzy_match__(row_key_text, 'current ratio', 95):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['current_ratio'] = val
 
-                if self.__is_fuzzy_match__(row_key_text, 'gearing ratio'):
+                if self.__is_fuzzy_match__(row_key_text, 'gearing ratio', 95):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['gearing_ratio'] = val
 
-                if self.__is_fuzzy_match__(row_key_text, 'debt to equity ratio [%]'):
+                if self.__is_fuzzy_match__(row_key_text, 'debt to equity ratio [%]', 95):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['debt_to_equity_ratio'] = val
@@ -1031,7 +1031,7 @@ class DocumentDataExtractor:
     def __str_to_decimal__(self, value: str) -> Decimal:
         """Converts a string representation of a number to Decimal, handling commas and spaces."""
         try:
-            clean_value = value.replace(',', '').replace(' ', '').replace('%', '')
+            clean_value = value.replace(',', '').replace(' ', '').replace('%', '').replace('*', '')
             if not clean_value:
                 logger.warning("Empty value passed to __str_to_decimal__")
                 return Decimal(0)
