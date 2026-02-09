@@ -936,9 +936,11 @@ class DocumentDataExtractor:
                 if extracted_data.get('ccris_conduct'):
                     parsed_data['repayment_to_banks'] = self.__parse_conduct_values(extracted_data['ccris_conduct'])
 
-                # TODO compare with doc intelligence extraction (if available)
-                self.extract_using_image('ccris_detail')
-
+                if extracted_data.get('ccris_conduct') is not None and extracted_data.get('total_outstanding_balance_1') is None and extracted_data.get('total_limit_1') is None:
+                    self.extract_using_image('ccris_detail_edge_case')
+                else:
+                    self.extract_using_image('ccris_detail')
+                
                 util_keys = ['total_outstanding_balance_0', 'total_outstanding_balance_1', 'total_limit_0', 'total_limit_1']
                 if all(extracted_data.get(key) is not None for key in util_keys):
                     if self.__normalize_numeric_str__(extracted_data['total_outstanding_balance_0']) == self.__normalize_numeric_str__(extracted_data['total_outstanding_balance_1']) and self.__normalize_numeric_str__(extracted_data['total_limit_0']) == self.__normalize_numeric_str__(extracted_data['total_limit_1']):
@@ -1224,24 +1226,35 @@ class DocumentDataExtractor:
         """Returns the prompt string for a given table tag."""
         match table_tag:
             case 'ccris_summary':
-                pass
+                return (
+                    "Extract the following fields from the table with the heading 'C1: BANKING PAYMENT RECORDS (SOURCE: CCRIS, BANK NEGARA MALAYSIA). Under the subheading 'Summary of Potential & Current Liabilities', for the first row labeled 'As Borrower', extract the two values of total outstanding balance and total limit from the columns 'Outstanding' and 'Total Limit'. Do not confuse this with the second row labeled 'As Guarantor'. Do not confuse this with the third row labeled 'Total'. Extract the value ('Y' or 'N') for the field 'Special Attention Account' which is the last row of the table, under the column 'Outstanding'. If any of these fields are not present in the tables, return null for that field. Return the extracted data in the following JSON format: {\"total_outstanding_balance\": value or null, \"total_limit\": value or null, \"special_attention_accounts\": value or null}."
+                )
             case 'ccris_detail':
-                pass
+                return (
+                    "Attached are images of pages from a credit report containing a table with the heading 'CCRIS Details' and subheadings 'Loan Information', 'Special Attention Account', and 'Credit Application'. The columns are: 'No', 'Date', 'Sts', 'Capacity', 'Lender Type', 'Facility', 'Total Outstanding Balance', 'Data Balance Updated', 'Limit/Installment Amount', 'Prin. Repmt. Term', 'Col Type', 'Conduct of Account For Last 12 Months', 'LGL STS', and 'Date Status Updated'. The column 'Conduct of Account For Last 12 Months' contains 12 sub-columns representing the repayment conduct for each of the last 12 months, with values representing the number of months the payment was late (0 for on-time payment). We are only interested in extracting data from the column 'Conduct of Account For Last 12 Months' and the summary row showing 'Total Outstanding Balance' and 'Total Limit' right before the subheading 'Special Attention Account'. "
+                    "The 'CCRIS Details' table may span multiple pages. "
+                    "The 'CCRIS Details' table ends when you encounter the 'Remark Legend', or any section header that is clearly not part of the CCRIS details table. "
+                    "Extract the following from the CCRIS details table: "
+                    "1. 'total_outstanding_balance': The total outstanding balance value from the summary row at the bottom of the table, right before the subheading 'Special Attention Account'. "
+                    "2. 'total_limit': The total limit value from the summary row at the bottom of the table, right before the subheading 'Special Attention Account'. "
+                    "3. 'ccris_conduct': For each loan row, extract the values (the numeric digits in the monthly columns under the column 'Conduct of Account For Last 12 Months'). There may be multiple loan rows. Collect the values from each loan row into a single list of strings, where each string represents the 12 monthly conduct values for that loan (e.g., '000000000000' for on-time payments for all 12 months). Although there are 12 monthly columns, there are usually only 11 columns populated, with the most leftmost month being empty: in this case, you should only return the 11 populated months as a string (e.g., '00000000000'). In other words, return only when populated, nothing more, nothing less."
+                    "Return the extracted data in the following JSON format: "
+                    "{\"total_outstanding_balance\": value or null, \"total_limit\": value or null, \"ccris_conduct\": [list of conduct strings] or null}."
+                )
             case 'ccris_detail_edge_case':
                 return (
-                    "Attached are images of pages from a credit report containing CCRIS (Central Credit Reference Information System) details. "
-                    "The CCRIS details table contains outstanding credit information including loan details, outstanding balances, limits, and repayment conduct. "
-                    "The table may span multiple pages. "
-                    "The CCRIS details table ends when you encounter any of the following markers: "
-                    "'Special Attention Account', 'Credit Application', 'Remark Legend', or any section header that is clearly not part of the CCRIS details table. "
+                    "Attached are images of pages from a credit report containing a table with the heading 'CCRIS Details' and subheadings 'Loan Information', 'Special Attention Account', and 'Credit Application'. The columns are: 'No', 'Date', 'Sts', 'Capacity', 'Lender Type', 'Facility', 'Total Outstanding Balance', 'Data Balance Updated', 'Limit/Installment Amount', 'Prin. Repmt. Term', 'Col Type', 'Conduct of Account For Last 12 Months', 'LGL STS', and 'Date Status Updated'. The column 'Conduct of Account For Last 12 Months' contains 12 sub-columns representing the repayment conduct for each of the last 12 months, with values representing the number of months the payment was late (0 for on-time payment). We are only interested in extracting data from the column 'Conduct of Account For Last 12 Months' and the summary row showing 'Total Outstanding Balance' and 'Total Limit' right before the subheading 'Special Attention Account'. "
+                    "The 'CCRIS Details' table may span multiple pages. "
+                    "The 'CCRIS Details' table ends when you encounter the 'Remark Legend', or any section header that is clearly not part of the CCRIS details table. "
                     "Extract the following from the CCRIS details table: "
-                    "1. 'total_outstanding_balance': The total outstanding balance value from the summary row at the bottom of the table. "
-                    "2. 'total_limit': The total limit value from the summary row at the bottom of the table. "
-                    "3. 'conduct': For each loan row, extract the 12-month repayment conduct values (the numeric digits in the monthly columns). "
+                    "1. 'total_outstanding_balance': The total outstanding balance value from the summary row at the bottom of the table, right before the subheading 'Special Attention Account'. "
+                    "2. 'total_limit': The total limit value from the summary row at the bottom of the table, right before the subheading 'Special Attention Account'. "
+                    "3. 'ccris_conduct': For each loan row, extract the values (the numeric digits in the monthly columns under the column 'Conduct of Account For Last 12 Months'). There may be multiple loan rows. Collect the values from each loan row into a single list of strings, where each string represents the 12 monthly conduct values for that loan (e.g., '000000000000' for on-time payments for all 12 months). Although there are 12 monthly columns, there are usually only 11 columns populated, with the most leftmost month being empty: in this case, you should only return the 11 populated months as a string (e.g., '00000000000'). In other words, return only when populated, nothing more, nothing less."
                     "Return the extracted data in the following JSON format: "
-                    "{\"total_outstanding_balance\": value or null, \"total_limit\": value or null, \"conduct\": [list of conduct strings] or null}."
+                    "{\"total_outstanding_balance\": value or null, \"total_limit\": value or null, \"ccris_conduct\": [list of conduct strings] or null}."
                 )
             case 'credit_info_at_a_glance':
+                # company or individual
                 pass
             case 'snapshot':
                 pass
