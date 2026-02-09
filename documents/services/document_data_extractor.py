@@ -8,7 +8,7 @@ import base64
 from openai import AzureOpenAI
 from thefuzz import fuzz
 import io
-from typing import Dict, List, TypeVar, Optional, Any
+from typing import Dict, List, Tuple, TypeVar, Optional, Any
 from azure.ai.documentintelligence import DocumentIntelligenceClient
 from azure.ai.documentintelligence.models import AnalyzeResult, DocumentContentFormat, DocumentAnalysisFeature
 from shared.confidence.confidence_utils import merge_confidence_values
@@ -71,6 +71,7 @@ class DocumentDataExtractor:
         self.relevant_paras: Dict[str, int] = {}
         self.options: DocumentDataExtractorOptions = None
         self.bytes: bytes = None
+        self.table_page_ranges: Dict[str, Tuple[int, int]] = {}
 
     def __safe_get_cell__(self, table, r_idx: int, c_idx: int) -> Optional[str]:
         """Safely gets and strips a cell value from a table row, returning None if the cell doesn't exist."""
@@ -283,7 +284,23 @@ class DocumentDataExtractor:
                 if plaintiff and self.__is_fuzzy_match__(plaintiff, 'no information available', 98):
                     relevant_paras['legal_plaintiff_none'] = idx
         return relevant_paras
-        
+    
+    def __record_table_pages__(self, table_idx: int, table_tag: str):
+        """Records the page range for a tagged table type."""
+        table = self.result.tables[table_idx]
+        pages = set()
+        for region in (table.bounding_regions or []):
+            pages.add(region.page_number)
+        if not pages:
+            return
+        min_page, max_page = min(pages), max(pages)
+        # Expand existing range if this tag was already seen (e.g. multi-page CCRIS_DETAILS_MULTI_MID tables)
+        if table_tag in self.table_page_ranges:
+            existing_min, existing_max = self.table_page_ranges[table_tag]
+            min_page = min(existing_min, min_page)
+            max_page = max(existing_max, max_page)
+        self.table_page_ranges[table_tag] = (min_page, max_page)
+
     def __identify_tables_from_json__(self) -> List[Dict]:
         """Identify relevant tables."""
         
@@ -312,6 +329,7 @@ class DocumentDataExtractor:
                         'type': idx_and_type[0]['type'],
                         'table': lookup_table
                     })
+                    self.__record_table_pages__(idx_and_type[0]['idx'], idx_and_type[0]['type'])
             elif len(idx_and_type) > 1:
                 # multi-page CCRIS Details tables identified
                 for item in idx_and_type:
@@ -320,7 +338,7 @@ class DocumentDataExtractor:
                         'type': item['type'],
                         'table': lookup_table
                     })
-        
+                    self.__record_table_pages__(item['idx'], item['type'])
         logger.info("Tagged %d tables after processing", len(tagged_tables))
         return tagged_tables
 
@@ -866,9 +884,10 @@ class DocumentDataExtractor:
             if extracted_data.get('ccris_conduct'):
                 parsed_data['repayment_to_banks'] = self.__parse_conduct_values(extracted_data['ccris_conduct'])
 
-            # TODO compare with doc intelligence extraction (if available)
-            # if there is ccris_detail_single, but no util, then the ccris_detail_single might actually be a multi-page table so should send multiple pages to the end of the report, prompting the llm that the ccris_detail_table ends when you see 'special attention account', 'credit application', 'remark legend'.
-            self.extract_using_image('ccris_detail')
+            if extracted_data.get('ccris_conduct') is not None and extracted_data.get('total_outstanding_balance_1') is None and extracted_data.get('total_limit_1') is None:
+                self.extract_using_image('ccris_detail_edge_case')
+            else:
+                self.extract_using_image('ccris_detail')
 
             util_keys = ['total_outstanding_balance_0', 'total_outstanding_balance_1', 'total_limit_0', 'total_limit_1']
             if all(extracted_data.get(key) is not None for key in util_keys):
@@ -1173,6 +1192,34 @@ class DocumentDataExtractor:
         response_obj_dict = response_obj.model_dump()
         return response_obj_dict
 
+    def __get_page_range_for_table_tag__(self, table_tag: str) -> Tuple[Optional[int], Optional[int]]:
+        """Returns the page range (start, end) for a given table tag."""
+        # Map extract_using_image tags to the table type constants used during tagging
+        tag_to_types = {
+            'ccris_summary': ['CCRIS_SUMMARY'],
+            'ccris_detail': ['CCRIS_DETAILS_SINGLE', 'CCRIS_DETAILS_MULTI_START', 'CCRIS_DETAILS_MULTI_MID', 'CCRIS_DETAILS_MULTI_END'],
+            'ccris_detail_edge_case': ['CCRIS_DETAILS_SINGLE'],
+            'credit_info_at_a_glance': ['CREDIT_INFO_AT_A_GLANCE'],
+            'snapshot': ['SNAPSHOT'],
+            'financials_and_shareholders': ['FINANCIALS_AND_SHAREHOLDERS'],
+            'financial_statements': ['FINANCIAL_STATEMENTS'],
+        }
+        
+        types = tag_to_types.get(table_tag, [])
+        min_page, max_page = None, None
+        
+        for t in types:
+            if t in self.table_page_ranges:
+                t_min, t_max = self.table_page_ranges[t]
+                min_page = t_min if min_page is None else min(min_page, t_min)
+                max_page = t_max if max_page is None else max(max_page, t_max)
+        
+        # Edge case: CCRIS_DETAILS_SINGLE may actually be a multi-page table where the number of columns parsed for the first part of the table and subsequent parts are different. Since __detect_ccris_details_tables__ relies on column_count, it gets tagged as SINGLE. A future fix would be to detect the boilerplate between multi-page tables, or parsing the markdown, for a more robust detect method. To handle this case, we extend the end page to the end of the document so the LLM can find the rest of the table.
+        if table_tag == 'ccris_detail_edge_case':
+            max_page = len(self.result.pages)
+
+        return (min_page, max_page)
+            
     def __get_prompt_for_table_tag__(self, table_tag: str) -> str:
         """Returns the prompt string for a given table tag."""
         match table_tag:
@@ -1180,6 +1227,20 @@ class DocumentDataExtractor:
                 pass
             case 'ccris_detail':
                 pass
+            case 'ccris_detail_edge_case':
+                return (
+                    "Attached are images of pages from a credit report containing CCRIS (Central Credit Reference Information System) details. "
+                    "The CCRIS details table contains outstanding credit information including loan details, outstanding balances, limits, and repayment conduct. "
+                    "The table may span multiple pages. "
+                    "The CCRIS details table ends when you encounter any of the following markers: "
+                    "'Special Attention Account', 'Credit Application', 'Remark Legend', or any section header that is clearly not part of the CCRIS details table. "
+                    "Extract the following from the CCRIS details table: "
+                    "1. 'total_outstanding_balance': The total outstanding balance value from the summary row at the bottom of the table. "
+                    "2. 'total_limit': The total limit value from the summary row at the bottom of the table. "
+                    "3. 'conduct': For each loan row, extract the 12-month repayment conduct values (the numeric digits in the monthly columns). "
+                    "Return the extracted data in the following JSON format: "
+                    "{\"total_outstanding_balance\": value or null, \"total_limit\": value or null, \"conduct\": [list of conduct strings] or null}."
+                )
             case 'credit_info_at_a_glance':
                 pass
             case 'snapshot':
