@@ -252,6 +252,7 @@ class DocumentDataExtractor:
         # Multiple periods: all but the last are OCR'd commas
         return ''.join(parts[:-1]) + '.' + parts[-1]
 
+    # TODO evaluate necessity of this since false positives
     def __find_paragraphs__(self) -> Dict[str, int]:
         """Locate relevant paragraphs since information is captured either as paragraphs or tables."""
         relevant_paras = {}
@@ -885,7 +886,7 @@ class DocumentDataExtractor:
 
             legal_keys = ['legal_non_personal', 'legal_personal']
             if all(extracted_data.get(key) is not None for key in legal_keys):
-                if extracted_data['legal_non_personal'] == '0' and extracted_data['legal_personal'] == '0' and self.relevant_paras.get('legal_plaintiff_none') is not None and self.relevant_paras.get('legal_defendant_none') is not None:
+                if extracted_data['legal_non_personal'] == '0' and extracted_data['legal_personal'] == '0':
                     parsed_data['legal_cases'] = 0
                 else:
                     np = int(extracted_data['legal_non_personal'])
@@ -906,7 +907,8 @@ class DocumentDataExtractor:
             
         elif self.report_type == ReportType.COMPANY:
             
-            if self.relevant_paras.get('ccris_not_available') is not None and extracted_data.get('ccris_conduct') is None:
+            util_keys = ['total_outstanding_balance_0', 'total_outstanding_balance_1', 'total_limit_0', 'total_limit_1']
+            if all(extracted_data.get(key) is None for key in util_keys) and extracted_data.get('ccris_conduct') is None:
                 parsed_data['repayment_to_banks'] = 'N/A'
                 parsed_data['utilisation'] = 'N/A'
             else:
@@ -933,7 +935,7 @@ class DocumentDataExtractor:
                 parsed_data['special_attention_accounts'] = extracted_data['special_attention_accounts_entity']
 
             if extracted_data.get('legal_non_personal_entity') is not None and extracted_data.get('legal_personal_entity') is not None:
-                if extracted_data['legal_non_personal_entity'] == '0' and extracted_data['legal_personal_entity'] == '0' and self.relevant_paras.get('legal_plaintiff_none') is not None and self.relevant_paras.get('legal_defendant_none') is not None:
+                if extracted_data['legal_non_personal_entity'] == '0' and extracted_data['legal_personal_entity'] == '0':
                     parsed_data['legal_cases'] = 0
                 else:
                     np = int(extracted_data['legal_non_personal_entity'])
