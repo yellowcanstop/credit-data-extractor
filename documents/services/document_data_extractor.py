@@ -893,7 +893,7 @@ class DocumentDataExtractor:
             if details_image_data:
                 if details_image_data.get('ccris_conduct') is not None:
                     logger.info("CCRIS Conduct data extracted from image: %s", details_image_data['ccris_conduct'])
-                    parsed_data['repayment_to_banks'] = self.__parse_conduct_values(details_image_data['ccris_conduct'])
+                    parsed_data['repayment_to_banks'] = self.__parse_conduct_values_image__(details_image_data['ccris_conduct'])
                 
                 if extracted_data.get('total_outstanding_balance_1') is None and details_image_data.get('total_outstanding_balance_1') is not None:
                     extracted_data['total_outstanding_balance_1'] = details_image_data['total_outstanding_balance_1']
@@ -906,7 +906,7 @@ class DocumentDataExtractor:
             # parsed ccris_conduct from document intelligence is only used as a reference. The actual repayment_to_banks value is extracted from image extraction.
             if parsed_data.get('repayment_to_banks') is None:
                 if extracted_data.get('ccris_conduct'):
-                    parsed_data['repayment_to_banks'] = self.__parse_conduct_values(extracted_data['ccris_conduct'])
+                    parsed_data['repayment_to_banks'] = self.__parse_conduct_values__(extracted_data['ccris_conduct'])
                 else:
                     logger.error("CCRIS Conduct data not found in both table and image extraction. Repayment to banks field will be missing.")
 
@@ -988,7 +988,7 @@ class DocumentDataExtractor:
                 if details_image_data:
                     if details_image_data.get('ccris_conduct') is not None:
                         logger.info("CCRIS Conduct data extracted from image: %s", details_image_data['ccris_conduct'])
-                        parsed_data['repayment_to_banks'] = self.__parse_conduct_values(details_image_data['ccris_conduct'])
+                        parsed_data['repayment_to_banks'] = self.__parse_conduct_values_image__(details_image_data['ccris_conduct'])
                     
                     if extracted_data.get('total_outstanding_balance_1') is None and details_image_data.get('total_outstanding_balance_1') is not None:
                         extracted_data['total_outstanding_balance_1'] = details_image_data['total_outstanding_balance_1']
@@ -1001,7 +1001,7 @@ class DocumentDataExtractor:
                 # parsed ccris_conduct from document intelligence is only used as a reference. The actual repayment_to_banks value is extracted from image extraction.
                 if parsed_data.get('repayment_to_banks') is None:
                     if extracted_data.get('ccris_conduct'):
-                        parsed_data['repayment_to_banks'] = self.__parse_conduct_values(extracted_data['ccris_conduct'])
+                        parsed_data['repayment_to_banks'] = self.__parse_conduct_values__(extracted_data['ccris_conduct'])
                     else:
                         logger.error("CCRIS Conduct data not found in both table and image extraction. Repayment to banks field will be missing.")
                 
@@ -1359,7 +1359,7 @@ class DocumentDataExtractor:
                     "Extract the following from the CCRIS details table: "
                     "1. 'total_outstanding_balance': The total outstanding balance value from the summary row at the bottom of the table, right before the subheading 'Special Attention Account'. "
                     "2. 'total_limit': The total limit value from the summary row at the bottom of the table, right before the subheading 'Special Attention Account'. "
-                    "3. 'ccris_conduct': For each loan row, extract the values (the numeric digits in the monthly columns under the column 'Conduct of Account For Last 12 Months'). There may be multiple loan rows. Collect the values from each loan row into a single list of strings, where each string represents the 12 monthly conduct values for that loan (e.g., '001000002000' if all 12 subcolumns are populated with the digits shown, '00000000000' if only 11 subcolumns are populated with '0' in this example). "
+                    "3. 'ccris_conduct': For each loan row, extract the values (the numeric digits in the monthly columns under the column 'Conduct of Account For Last 12 Months'). There may be multiple loan rows. For each loan row, collect the values into a list of integers. For example, if there are two rows, with the first loan row having all 12 subcolumns populated with the digits shown and the second loan row having only 11 subcolumns populated with the digits shown, then the final ccris_conduct is [[0,0,1,0,0,0,0,0,2,0,0,0], [0,0,1,0,0,0,0,0,2,0,0,0]]. Therefore, if you see a missing month, skip it. Do not represent a missing month with a 0. If you are unsure of the individual digits extracted, then return null for ccris_conduct."
                     "Return the extracted data in the following JSON format: "
                     "{\"total_outstanding_balance\": value or null, \"total_limit\": value or null, \"ccris_conduct\": [list of conduct strings] or null}."
                 )
@@ -1371,7 +1371,7 @@ class DocumentDataExtractor:
                     "Extract the following from the CCRIS details table: "
                     "1. 'total_outstanding_balance': The total outstanding balance value from the summary row at the bottom of the table, right before the subheading 'Special Attention Account'. "
                     "2. 'total_limit': The total limit value from the summary row at the bottom of the table, right before the subheading 'Special Attention Account'. "
-                    "3. 'ccris_conduct': For each loan row, extract the values (the numeric digits in the monthly columns under the column 'Conduct of Account For Last 12 Months'). There may be multiple loan rows. Collect the values from each loan row into a single list of strings, where each string represents the 12 monthly conduct values for that loan (e.g., '001000002000' if all 12 subcolumns are populated with the digits shown, '00000000000' if only 11 subcolumns are populated with '0' in this example). "
+                    "3. 'ccris_conduct': For each loan row, extract the values (the numeric digits in the monthly columns under the column 'Conduct of Account For Last 12 Months'). There may be multiple loan rows. For each loan row, collect the values into a list of integers. For example, if there are two rows, with the first loan row having all 12 subcolumns populated with the digits shown and the second loan row having only 11 subcolumns populated with the digits shown, then the final ccris_conduct is [[0,0,1,0,0,0,0,0,2,0,0,0], [0,0,1,0,0,0,0,0,2,0,0,0]]. Therefore, if you see a missing month, skip it. Do not represent a missing month with a 0. If you are unsure of the individual digits extracted, then return null for ccris_conduct."
                     "Return the extracted data in the following JSON format: "
                     "{\"total_outstanding_balance\": value or null, \"total_limit\": value or null, \"ccris_conduct\": [list of conduct strings] or null}."
                 )
@@ -1423,10 +1423,13 @@ class DocumentDataExtractor:
     
     def __calculate_years__(self, date_str: str) -> int:
         """Calculates years since date string DD-MM-YYYY."""
-        date = datetime.strptime(date_str, '%d-%m-%Y')
-        today = datetime.today()
-        years_elapsed = today.year - date.year - ((today.month, today.day) < (date.month, date.day))
-        return years_elapsed
+        try:
+            date = datetime.strptime(date_str, '%d-%m-%Y')
+            today = datetime.today()
+            years_elapsed = today.year - date.year - ((today.month, today.day) < (date.month, date.day))
+            return years_elapsed
+        except ValueError:
+            return None
     
     def __str_to_decimal__(self, value: str) -> Decimal:
         """Converts a string representation of a number to Decimal, handling commas, spaces, and special characters."""
@@ -1477,7 +1480,37 @@ class DocumentDataExtractor:
             logger.warning("Failed to parse '%s' as Decimal: %s", value, e)
             return Decimal(0)
     
-    def __parse_conduct_values(self, conduct_values: List[str]) -> str:
+    def __parse_conduct_values_image__(self, conduct_values: List[List[int]]) -> str:
+        """Evaluate conduct of account based on conduct values extracted from CCRIS Details table in image extraction."""
+        flat_list = [item for sublist in conduct_values for item in sublist]
+        zeroes = 0
+        ones = 0
+        twos = 0
+        threes_to_fives = 0
+        high_non_zeroes = 0
+        digits = len(flat_list)
+        for digit in flat_list:
+            if digit == 0:
+                zeroes += 1
+            elif digit == 1:
+                ones += 1
+            elif digit == 2:
+                twos += 1
+            elif 3 <= digit <= 5:
+                threes_to_fives += 1
+            elif digit >= 6:
+                high_non_zeroes += 1
+            else:
+                digits -= 1  # invalid
+        non_zeroes = digits - zeroes
+        if digits == zeroes or ((non_zeroes / digits) < 0.2 and non_zeroes == ones):
+            return 'Satisfactory'
+        elif (non_zeroes / digits) < 0.3 and non_zeroes == (ones + twos):
+            return 'Moderate'
+        else:
+            return 'Poor'
+
+    def __parse_conduct_values__(self, conduct_values: List[str]) -> str:
         """Evaluate conduct of account based on conduct values extracted from CCRIS Details table."""
         digits = 0
         zeroes = 0
