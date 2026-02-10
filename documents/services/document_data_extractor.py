@@ -1261,7 +1261,8 @@ class DocumentDataExtractor:
             user_content.append({
                 "type": "image_url",
                 "image_url": {
-                    "url": image_uri
+                    "url": image_uri,
+                    "detail": "high"
                 }
             })
 
@@ -1587,7 +1588,8 @@ class DocumentDataExtractor:
             pages = convert_from_bytes(
                 document_bytes,
                 first_page=page_start,
-                last_page=page_end
+                last_page=page_end,
+                dpi=300
             )
             logger.debug("Converted PDF pages %s to %s to %d images", page_start, page_end, len(pages))
         except Exception as e:
