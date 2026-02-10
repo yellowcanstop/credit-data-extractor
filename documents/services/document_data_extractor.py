@@ -237,6 +237,12 @@ class DocumentDataExtractor:
         # Convert Decimal values to float for JSON serialization
         return {k: float(v) if isinstance(v, Decimal) else v for k, v in parsed_data.items()}
     
+    def __to_decimal__(self, value) -> Decimal:
+        """Converts a value to Decimal. Skips string normalization if value is already numeric."""
+        if isinstance(value, (int, float)):
+            return Decimal(str(value))
+        return self.__str_to_decimal__(self.__normalize_numeric_str__(value))
+
     def __normalize_numeric_str__(self, value: str) -> str:
         """Normalizes a numeric string to handle OCR errors.
         Handles cases where:
@@ -913,8 +919,8 @@ class DocumentDataExtractor:
             util_keys = ['total_outstanding_balance_0', 'total_outstanding_balance_1', 'total_limit_0', 'total_limit_1']
             if all(extracted_data.get(key) is not None for key in util_keys):
                 if self.__normalize_numeric_str__(extracted_data['total_outstanding_balance_0']) == self.__normalize_numeric_str__(extracted_data['total_outstanding_balance_1']) and self.__normalize_numeric_str__(extracted_data['total_limit_0']) == self.__normalize_numeric_str__(extracted_data['total_limit_1']):
-                    bal = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['total_outstanding_balance_0']))
-                    limit = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['total_limit_0']))
+                    bal = self.__to_decimal__(extracted_data['total_outstanding_balance_0'])
+                    limit = self.__to_decimal__(extracted_data['total_limit_0'])
                     if limit > 0:
                         utilisation = bal / limit * 100
                         parsed_data['utilisation'] = utilisation
@@ -943,8 +949,8 @@ class DocumentDataExtractor:
                 summary_image_data = self.extract_using_image('ccris_summary')
                 if summary_image_data:
                     if summary_image_data.get('total_outstanding_balance') is not None and summary_image_data.get('total_limit') is not None:
-                        bal = self.__str_to_decimal__(self.__normalize_numeric_str__(summary_image_data['total_outstanding_balance']))
-                        limit = self.__str_to_decimal__(self.__normalize_numeric_str__(summary_image_data['total_limit']))
+                        bal = self.__to_decimal__(summary_image_data['total_outstanding_balance'])
+                        limit = self.__to_decimal__(summary_image_data['total_limit'])
                         if limit > 0:
                             utilisation = bal / limit * 100
                             parsed_data['utilisation'] = utilisation
@@ -1008,8 +1014,8 @@ class DocumentDataExtractor:
                 util_keys = ['total_outstanding_balance_0', 'total_outstanding_balance_1', 'total_limit_0', 'total_limit_1']
                 if all(extracted_data.get(key) is not None for key in util_keys):
                     if self.__normalize_numeric_str__(extracted_data['total_outstanding_balance_0']) == self.__normalize_numeric_str__(extracted_data['total_outstanding_balance_1']) and self.__normalize_numeric_str__(extracted_data['total_limit_0']) == self.__normalize_numeric_str__(extracted_data['total_limit_1']):
-                        bal = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['total_outstanding_balance_0']))
-                        limit = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['total_limit_0']))
+                        bal = self.__to_decimal__(extracted_data['total_outstanding_balance_0'])
+                        limit = self.__to_decimal__(extracted_data['total_limit_0'])
                         if limit > 0:
                             utilisation = bal / limit * 100
                             parsed_data['utilisation'] = utilisation
@@ -1018,8 +1024,8 @@ class DocumentDataExtractor:
                     logger.info("Utilisation not found from table extraction, falling back to image extraction")
                     summary_image_data = self.extract_using_image('ccris_summary')
                     if summary_image_data and summary_image_data.get('total_outstanding_balance') is not None and summary_image_data.get('total_limit') is not None:
-                        bal = self.__str_to_decimal__(self.__normalize_numeric_str__(summary_image_data['total_outstanding_balance']))
-                        limit = self.__str_to_decimal__(self.__normalize_numeric_str__(summary_image_data['total_limit']))
+                        bal = self.__to_decimal__(summary_image_data['total_outstanding_balance'])
+                        limit = self.__to_decimal__(summary_image_data['total_limit'])
                         if limit > 0:
                             utilisation = bal / limit * 100
                             parsed_data['utilisation'] = utilisation
@@ -1110,55 +1116,55 @@ class DocumentDataExtractor:
                 parsed_data['gearing_ratio'] = 'N/A'
             else:
                 if extracted_data.get('paid_up_capital') is not None:
-                    parsed_data['paid_up_capital'] = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['paid_up_capital']))
+                    parsed_data['paid_up_capital'] = self.__to_decimal__(extracted_data['paid_up_capital'])
             
                 if extracted_data.get('financial_year_end') is not None:
                     parsed_data['financial_report_date'] = self.__reformat_date__(extracted_data['financial_year_end'])
 
                 if extracted_data.get('revenue_0') is not None and extracted_data.get('revenue_1') is not None:
                     if self.__normalize_numeric_str__(extracted_data['revenue_0']) == self.__normalize_numeric_str__(extracted_data['revenue_1']):
-                        parsed_data['turnover'] = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['revenue_0']))
+                        parsed_data['turnover'] = self.__to_decimal__(extracted_data['revenue_0'])
                     elif self.__normalize_numeric_str__(extracted_data['revenue_0']) == '0' and self.__normalize_numeric_str__(extracted_data['revenue_1']) == '0':
                         parsed_data['turnover'] = Decimal(0)
                     
                 if extracted_data.get('profit_after_tax_0') is not None and extracted_data.get('profit_after_tax_1') is not None:
                     if self.__normalize_numeric_str__(extracted_data['profit_after_tax_0']) == self.__normalize_numeric_str__(extracted_data['profit_after_tax_1']):
-                        parsed_data['net_profit'] = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['profit_after_tax_0']))
+                        parsed_data['net_profit'] = self.__to_decimal__(extracted_data['profit_after_tax_0'])
                     elif self.__normalize_numeric_str__(extracted_data['profit_after_tax_0']) == '0' and self.__normalize_numeric_str__(extracted_data['profit_after_tax_1']) == '0':
                         parsed_data['net_profit'] = Decimal(0)
                  
                 if extracted_data.get('retained_earning') is not None:
-                    parsed_data['retained_profit'] = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['retained_earning']))
+                    parsed_data['retained_profit'] = self.__to_decimal__(extracted_data['retained_earning'])
 
                 if extracted_data.get('net_worth') is not None:
-                    parsed_data['net_worth'] = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['net_worth']))
+                    parsed_data['net_worth'] = self.__to_decimal__(extracted_data['net_worth'])
 
                 fs_key = ['current_assets', 'current_liabilities', 'non_current_assets', 'total_assets', 'non_current_liabilities', 'long_term_liabilities', 'total_liabilities']
                 if all(extracted_data.get(key) is not None for key in fs_key):
-                    nca = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['non_current_assets']))
-                    ca = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['current_assets']))
-                    ta = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['total_assets']))
-                    ncl = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['non_current_liabilities']))
-                    cl = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['current_liabilities']))
-                    ltl = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['long_term_liabilities']))
-                    tl = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['total_liabilities']))
+                    nca = self.__to_decimal__(extracted_data['non_current_assets'])
+                    ca = self.__to_decimal__(extracted_data['current_assets'])
+                    ta = self.__to_decimal__(extracted_data['total_assets'])
+                    ncl = self.__to_decimal__(extracted_data['non_current_liabilities'])
+                    cl = self.__to_decimal__(extracted_data['current_liabilities'])
+                    ltl = self.__to_decimal__(extracted_data['long_term_liabilities'])
+                    tl = self.__to_decimal__(extracted_data['total_liabilities'])
 
                     valid_ca_cl = (ta == nca + ca) and (tl == ncl + cl + ltl)
                     if valid_ca_cl:
                         parsed_data['net_current_assets'] = ca - cl
                         if extracted_data.get('current_ratio') is not None:
-                            extracted_cr = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['current_ratio']))
+                            extracted_cr = self.__to_decimal__(extracted_data['current_ratio'])
                             cr = ca / cl if cl > 0 else Decimal(0)
                             if abs(cr - extracted_cr) < Decimal('0.01'):
                                 parsed_data['current_ratio'] = extracted_cr
 
                 bal_key = ['gearing_ratio', 'debt_to_equity_ratio', 'net_worth', 'total_liabilities']
                 if all(extracted_data.get(key) is not None for key in bal_key):
-                    tl = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['total_liabilities']))
-                    nw = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['net_worth']))
+                    tl = self.__to_decimal__(extracted_data['total_liabilities'])
+                    nw = self.__to_decimal__(extracted_data['net_worth'])
                     calculated_gr = tl / nw if nw > 0 else Decimal(0)
-                    extracted_gr = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['gearing_ratio']))
-                    extracted_der = self.__str_to_decimal__(self.__normalize_numeric_str__(extracted_data['debt_to_equity_ratio']))
+                    extracted_gr = self.__to_decimal__(extracted_data['gearing_ratio'])
+                    extracted_der = self.__to_decimal__(extracted_data['debt_to_equity_ratio'])
                     valid_gr = (abs(extracted_gr - extracted_der) < Decimal('0.01')) and (abs(extracted_gr - calculated_gr) < Decimal('0.01'))
                     if valid_gr:
                         parsed_data['gearing_ratio'] = extracted_gr
@@ -1172,7 +1178,7 @@ class DocumentDataExtractor:
                     logger.info("Paid up capital not found from table extraction, falling back to image extraction")
                     shareholders_image_data = self.extract_using_image('financials_and_shareholders')
                     if shareholders_image_data and shareholders_image_data.get('paid_up_capital') is not None:
-                        parsed_data['paid_up_capital'] = self.__str_to_decimal__(self.__normalize_numeric_str__(shareholders_image_data['paid_up_capital']))
+                        parsed_data['paid_up_capital'] = self.__to_decimal__(shareholders_image_data['paid_up_capital'])
                     else:
                         logger.error("Paid up capital not found in image extraction")
 
@@ -1187,31 +1193,30 @@ class DocumentDataExtractor:
                         
 
                         if parsed_data.get('turnover') is None and financials_image_data.get('revenue') is not None:
-                            parsed_data['turnover'] = self.__str_to_decimal__(self.__normalize_numeric_str__(financials_image_data['revenue']))
+                            parsed_data['turnover'] = self.__to_decimal__(financials_image_data['revenue'])
                         
                         
                         if parsed_data.get('net_profit') is None and financials_image_data.get('profit_after_tax') is not None:
-                            parsed_data['net_profit'] = self.__str_to_decimal__(self.__normalize_numeric_str__(financials_image_data['profit_after_tax']))
+                            parsed_data['net_profit'] = self.__to_decimal__(financials_image_data['profit_after_tax'])
                         
                         
                         if parsed_data.get('retained_profit') is None and financials_image_data.get('retained_earning') is not None:
-                            parsed_data['retained_profit'] = self.__str_to_decimal__(self.__normalize_numeric_str__(financials_image_data['retained_earning']))
+                            parsed_data['retained_profit'] = self.__to_decimal__(financials_image_data['retained_earning'])
                         
                         
                         if parsed_data.get('net_worth') is None and financials_image_data.get('net_worth') is not None:
-                            parsed_data['net_worth'] = self.__str_to_decimal__(self.__normalize_numeric_str__(financials_image_data['net_worth']))
-                        
+                            parsed_data['net_worth'] = self.__to_decimal__(financials_image_data['net_worth'])
                         
                         if parsed_data.get('net_current_assets') is None:
                             fs_key = ['current_assets', 'current_liabilities', 'non_current_assets', 'total_assets', 'non_current_liabilities', 'long_term_liabilities', 'total_liabilities']
                             if all(financials_image_data.get(key) is not None for key in fs_key):
-                                nca = self.__str_to_decimal__(self.__normalize_numeric_str__(financials_image_data['non_current_assets']))
-                                ca = self.__str_to_decimal__(self.__normalize_numeric_str__(financials_image_data['current_assets']))
-                                ta = self.__str_to_decimal__(self.__normalize_numeric_str__(financials_image_data['total_assets']))
-                                ncl = self.__str_to_decimal__(self.__normalize_numeric_str__(financials_image_data['non_current_liabilities']))
-                                cl = self.__str_to_decimal__(self.__normalize_numeric_str__(financials_image_data['current_liabilities']))
-                                ltl = self.__str_to_decimal__(self.__normalize_numeric_str__(financials_image_data['long_term_liabilities']))
-                                tl = self.__str_to_decimal__(self.__normalize_numeric_str__(financials_image_data['total_liabilities']))
+                                nca = self.__to_decimal__(financials_image_data['non_current_assets'])
+                                ca = self.__to_decimal__(financials_image_data['current_assets'])
+                                ta = self.__to_decimal__(financials_image_data['total_assets'])
+                                ncl = self.__to_decimal__(financials_image_data['non_current_liabilities'])
+                                cl = self.__to_decimal__(financials_image_data['current_liabilities'])
+                                ltl = self.__to_decimal__(financials_image_data['long_term_liabilities'])
+                                tl = self.__to_decimal__(financials_image_data['total_liabilities'])
                                 valid_ca_cl = (ta == nca + ca) and (tl == ncl + cl + ltl)
                                 if valid_ca_cl:
                                     parsed_data['net_current_assets'] = ca - cl
@@ -1219,9 +1224,9 @@ class DocumentDataExtractor:
                                     logger.error("Current assets and liabilities validation failed in image extraction")
                         
                         if parsed_data.get('current_ratio') is None and financials_image_data.get('current_ratio') is not None:
-                            extracted_cr = self.__str_to_decimal__(financials_image_data['current_ratio'])
-                            ca = self.__str_to_decimal__(self.__normalize_numeric_str__(financials_image_data['current_assets']))
-                            cl = self.__str_to_decimal__(self.__normalize_numeric_str__(financials_image_data['current_liabilities']))
+                            extracted_cr = self.__to_decimal__(financials_image_data['current_ratio'])
+                            ca = self.__to_decimal__(financials_image_data['current_assets'])
+                            cl = self.__to_decimal__(financials_image_data['current_liabilities'])
                             cr = ca / cl if cl > 0 else Decimal(0)
                             if abs(cr - extracted_cr) < Decimal('0.01'):
                                 parsed_data['current_ratio'] = extracted_cr
@@ -1229,10 +1234,10 @@ class DocumentDataExtractor:
                                 logger.error("Current ratio validation failed in image extraction")
                         
                         if parsed_data.get('gearing_ratio') is None and financials_image_data.get('gearing_ratio') is not None and financials_image_data.get('net_worth') is not None and financials_image_data.get('total_liabilities') is not None:
-                            tl = self.__str_to_decimal__(self.__normalize_numeric_str__(financials_image_data['total_liabilities']))
-                            nw = self.__str_to_decimal__(self.__normalize_numeric_str__(financials_image_data['net_worth']))
+                            tl = self.__to_decimal__(financials_image_data['total_liabilities'])
+                            nw = self.__to_decimal__(financials_image_data['net_worth'])
                             calculated_gr = tl / nw if nw > 0 else Decimal(0)
-                            extracted_gr = self.__str_to_decimal__(self.__normalize_numeric_str__(financials_image_data['gearing_ratio']))
+                            extracted_gr = self.__to_decimal__(financials_image_data['gearing_ratio'])
                             valid_gr = (abs(extracted_gr - calculated_gr) < Decimal('0.01'))
                             if valid_gr:
                                 parsed_data['gearing_ratio'] = extracted_gr
@@ -1462,25 +1467,6 @@ class DocumentDataExtractor:
             logger.warning("Failed to parse '%s' as Decimal: %s", value, e)
             return Decimal(0)
         
-    def __str_to_decimal__(self, value: str) -> Decimal:
-        """Converts a string representation of a number to Decimal, handling commas and spaces."""
-        try:
-            clean_value = value.replace(',', '').replace(' ', '').replace('%', '').replace('*', '')
-            if not clean_value:
-                logger.warning("Empty value passed to __str_to_decimal__")
-                return Decimal(0)
-            if clean_value.startswith('(') and clean_value.endswith(')'):
-                clean_value = '-' + clean_value[1:-1]
-
-            result = Decimal(clean_value)
-            
-            if '%' in value:
-                return result / 100
-            return result
-        except (InvalidOperation, AttributeError) as e:
-            logger.warning("Failed to parse '%s' as Decimal: %s", value, e)
-            return Decimal(0)
-    
     def __parse_conduct_values_image__(self, conduct_values: List[List[int]]) -> str:
         """Evaluate conduct of account based on conduct values extracted from CCRIS Details table in image extraction."""
         flat_list = [item for sublist in conduct_values for item in sublist]
