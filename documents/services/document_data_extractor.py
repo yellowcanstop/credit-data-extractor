@@ -1359,7 +1359,7 @@ class DocumentDataExtractor:
                     "Extract the following from the CCRIS details table: "
                     "1. 'total_outstanding_balance': The total outstanding balance value from the summary row at the bottom of the table, right before the subheading 'Special Attention Account'. "
                     "2. 'total_limit': The total limit value from the summary row at the bottom of the table, right before the subheading 'Special Attention Account'. "
-                    "3. 'ccris_conduct': For each loan row, extract the values (the numeric digits in the monthly columns under the column 'Conduct of Account For Last 12 Months'). There may be multiple loan rows. Collect the values from each loan row into a single list of strings, where each string represents the 12 monthly conduct values for that loan (e.g., '000000000000' for on-time payments for all 12 months). Although there are 12 monthly columns, there are usually only 11 columns populated, with the most leftmost month being empty: in this case, you should only return the 11 populated months as a string (e.g., '00000000000'). In other words, return only when populated, nothing more, nothing less."
+                    "3. 'ccris_conduct': For each loan row, extract the values (the numeric digits in the monthly columns under the column 'Conduct of Account For Last 12 Months'). There may be multiple loan rows. Collect the values from each loan row into a single list of strings, where each string represents the 12 monthly conduct values for that loan (e.g., '001000002000' if all 12 subcolumns are populated with the digits shown, '00000000000' if only 11 subcolumns are populated with '0' in this example). "
                     "Return the extracted data in the following JSON format: "
                     "{\"total_outstanding_balance\": value or null, \"total_limit\": value or null, \"ccris_conduct\": [list of conduct strings] or null}."
                 )
@@ -1371,7 +1371,7 @@ class DocumentDataExtractor:
                     "Extract the following from the CCRIS details table: "
                     "1. 'total_outstanding_balance': The total outstanding balance value from the summary row at the bottom of the table, right before the subheading 'Special Attention Account'. "
                     "2. 'total_limit': The total limit value from the summary row at the bottom of the table, right before the subheading 'Special Attention Account'. "
-                    "3. 'ccris_conduct': For each loan row, extract the values (the numeric digits in the monthly columns under the column 'Conduct of Account For Last 12 Months'). There may be multiple loan rows. Collect the values from each loan row into a single list of strings, where each string represents the 12 monthly conduct values for that loan (e.g., '000000000000' for on-time payments for all 12 months). Although there are 12 monthly columns, there are usually only 11 columns populated, with the most leftmost month being empty: in this case, you should only return the 11 populated months as a string (e.g., '00000000000'). In other words, return only when populated, nothing more, nothing less."
+                    "3. 'ccris_conduct': For each loan row, extract the values (the numeric digits in the monthly columns under the column 'Conduct of Account For Last 12 Months'). There may be multiple loan rows. Collect the values from each loan row into a single list of strings, where each string represents the 12 monthly conduct values for that loan (e.g., '001000002000' if all 12 subcolumns are populated with the digits shown, '00000000000' if only 11 subcolumns are populated with '0' in this example). "
                     "Return the extracted data in the following JSON format: "
                     "{\"total_outstanding_balance\": value or null, \"total_limit\": value or null, \"ccris_conduct\": [list of conduct strings] or null}."
                 )
@@ -1423,13 +1423,10 @@ class DocumentDataExtractor:
     
     def __calculate_years__(self, date_str: str) -> int:
         """Calculates years since date string DD-MM-YYYY."""
-        try:
-            date = datetime.strptime(date_str, '%d-%m-%Y')
-            today = datetime.today()
-            years_elapsed = today.year - date.year - ((today.month, today.day) < (date.month, date.day))
-            return years_elapsed
-        except ValueError:
-            return 0
+        date = datetime.strptime(date_str, '%d-%m-%Y')
+        today = datetime.today()
+        years_elapsed = today.year - date.year - ((today.month, today.day) < (date.month, date.day))
+        return years_elapsed
     
     def __str_to_decimal__(self, value: str) -> Decimal:
         """Converts a string representation of a number to Decimal, handling commas, spaces, and special characters."""
