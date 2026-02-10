@@ -1227,7 +1227,7 @@ class DocumentDataExtractor:
         match table_tag:
             case 'ccris_summary':
                 return (
-                    "Extract the following fields from the table with the heading 'C1: BANKING PAYMENT RECORDS (SOURCE: CCRIS, BANK NEGARA MALAYSIA). Under the subheading 'Summary of Potential & Current Liabilities', for the first row labeled 'As Borrower', extract the two values of total outstanding balance and total limit from the columns 'Outstanding' and 'Total Limit'. Do not confuse this with the second row labeled 'As Guarantor'. Do not confuse this with the third row labeled 'Total'. Extract the value ('Y' or 'N') for the field 'Special Attention Account' which is the last row of the table, under the column 'Outstanding'. If any of these fields are not present in the tables, return null for that field. Return the extracted data in the following JSON format: {\"total_outstanding_balance\": value or null, \"total_limit\": value or null, \"special_attention_accounts\": value or null}."
+                    "Extract the following fields from the table with the heading 'C1: BANKING PAYMENT RECORDS (SOURCE: CCRIS, BANK NEGARA MALAYSIA)'. Under the subheading 'Summary of Potential & Current Liabilities', for the first row labeled 'As Borrower', extract the two values of total outstanding balance and total limit from the columns 'Outstanding' and 'Total Limit'. Do not confuse this with the second row labeled 'As Guarantor'. Do not confuse this with the third row labeled 'Total'. Extract the value ('Y' or 'N') for the field 'Special Attention Account' which is the last row of the table, under the column 'Outstanding'. If any of these fields are not present in the table, return null for that field. Return the extracted data in the following JSON format: {\"total_outstanding_balance\": value or null, \"total_limit\": value or null, \"special_attention_accounts\": value or null}."
                 )
             case 'ccris_detail':
                 return (
@@ -1257,9 +1257,13 @@ class DocumentDataExtractor:
                 # company or individual
                 pass
             case 'snapshot':
-                pass
+                return (
+                    "Extract the following fields from the table with the heading 'A: SNAPSHOT'. Extract the value for the field 'Registration Date'. If you see any field labelled 'type' or 'type of company', extract the value for the field. Extract the value for the field 'MSIC'. If any of these fields are not present in the table, return null for that field. If you see any field labelled 'business commenced' or 'last changed date' or 'rob search date' or 'current registration expiry date' in the table, then this table is for a partnership and you should return true for is_partnership. Return the extracted data in the following JSON format: {\"registration_date\": value or null, \"type\": value or null, \"msic\": value or null, \"is_partnership\": true or false}."
+                )
             case 'financials_and_shareholders':
-                pass
+                return (
+                    "Extract the value of 'Paid-Up Capital (RM)' from the table with the heading 'Financials and Shareholders'. The first column of the table is the field name and the second column of the table is the value. If this field is not present in the table, return null for that field. Return the extracted data in the following JSON format: {\"paid_up_capital\": value or null}."
+                )
             case 'financial_statements':
                 return (
                     "Attached are images of financial statements of a company. Each financial statement is a table. " 
