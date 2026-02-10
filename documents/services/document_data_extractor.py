@@ -1,6 +1,7 @@
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 import enum
+import json
 import re
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from pdf2image import convert_from_bytes
@@ -81,6 +82,7 @@ class DocumentDataExtractor:
             return None
         return value.strip()
 
+    '''
     def from_bytes(self, document_bytes: bytes, response_format: type[ResponseFormatT], options: DocumentDataExtractorOptions) -> ExtractionConfidenceResult:
         """Extracts structured data from the specified document bytes by converting the document to images and using an Azure OpenAI model to extract the data.
 
@@ -179,7 +181,8 @@ class DocumentDataExtractor:
             confidence_scores=confidence,
             overall_confidence=confidence[OVERALL_CONFIDENCE_KEY]
         )
-    
+    '''
+
     def extract_using_doc_intelligence(self, document_bytes: bytes, options: DocumentDataExtractorOptions): 
         logger.info("Starting extraction, document size: %d bytes", len(document_bytes))
         
@@ -882,12 +885,14 @@ class DocumentDataExtractor:
         if self.report_type == ReportType.INDIVIDUAL:
                
             if extracted_data.get('ccris_conduct') is not None and extracted_data.get('total_outstanding_balance_1') is None and extracted_data.get('total_limit_1') is None:
+                logger.info("CCRIS Detail edge case detected.")
                 details_image_data = self.extract_using_image('ccris_detail_edge_case')
             else:
                 details_image_data = self.extract_using_image('ccris_detail')
 
             if details_image_data:
                 if details_image_data.get('ccris_conduct') is not None:
+                    logger.info("CCRIS Conduct data extracted from image: %s", details_image_data['ccris_conduct'])
                     parsed_data['repayment_to_banks'] = self.__parse_conduct_values(details_image_data['ccris_conduct'])
                 
                 if extracted_data.get('total_outstanding_balance_1') is None and details_image_data.get('total_outstanding_balance_1') is not None:
@@ -982,6 +987,7 @@ class DocumentDataExtractor:
 
                 if details_image_data:
                     if details_image_data.get('ccris_conduct') is not None:
+                        logger.info("CCRIS Conduct data extracted from image: %s", details_image_data['ccris_conduct'])
                         parsed_data['repayment_to_banks'] = self.__parse_conduct_values(details_image_data['ccris_conduct'])
                     
                     if extracted_data.get('total_outstanding_balance_1') is None and details_image_data.get('total_outstanding_balance_1') is not None:
@@ -1173,6 +1179,7 @@ class DocumentDataExtractor:
                 if (parsed_data.get('financial_report_date') is None) or (parsed_data.get('turnover') is None) or (parsed_data.get('net_profit') is None) or (parsed_data.get('retained_profit') is None) or (parsed_data.get('net_worth') is None) or (parsed_data.get('net_current_assets') is None) or (parsed_data.get('current_ratio') is None) or (parsed_data.get('gearing_ratio') is None):
                     logger.info("Financial statements data incomplete from table extraction, falling back to image extraction")
                     financials_image_data = self.extract_using_image('financial_statements')
+                    logger.info("Financial statements data extracted from image: %s", json.dumps(financials_image_data, indent=2))
 
                     if financials_image_data:
                         if parsed_data.get('financial_report_date') is None and financials_image_data.get('financial_year_end') is not None:
@@ -1247,12 +1254,8 @@ class DocumentDataExtractor:
             self.bytes, page_start, page_end)
         
         table_prompt = self.__get_prompt_for_table_tag__(table_tag)
-        
-        user_content = []
-        user_content.append({
-            "type": "text",
-            "text": table_prompt
-        })
+
+        user_content = [{"type": "text", "text": table_prompt}]
 
         for image_uri in image_uris:
             user_content.append({
@@ -1261,7 +1264,34 @@ class DocumentDataExtractor:
                     "url": image_uri
                 }
             })
+
+        # 1. Change to .create() instead of .beta...parse()
+        completion = client.chat.completions.create(
+            model=self.options.deployment_name,
+            messages=[
+                {"role": "system", "content": self.options.system_prompt},
+                {"role": "user", "content": user_content}
+            ],
+            max_tokens=self.options.max_tokens,
+            temperature=self.options.temperature,
+            top_p=self.options.top_p,
+            logprobs=True,
+            # 2. Set response_format to json_object
+            response_format={"type": "json_object"}
+        )
+
+        # 3. Access .content (a string) and parse it manually
+        raw_content = completion.choices[0].message.content
         
+        try:
+            response_obj_dict = json.loads(raw_content)
+            return response_obj_dict
+        except json.JSONDecodeError:
+            # Fallback in case the model returns invalid JSON 
+            # (Rare with json_object mode, but good practice)
+            return {"error": "Failed to decode JSON", "raw": raw_content}
+        
+        '''
         completion = client.beta.chat.completions.parse(
             model=self.options.deployment_name,
             messages=[
@@ -1274,7 +1304,6 @@ class DocumentDataExtractor:
                     "content": user_content
                 }
             ],
-            response_format=self.options.response_format,
             max_tokens=self.options.max_tokens,
             temperature=self.options.temperature,
             top_p=self.options.top_p,
@@ -1285,6 +1314,7 @@ class DocumentDataExtractor:
         response_obj = completion.choices[0].message.parsed
         response_obj_dict = response_obj.model_dump()
         return response_obj_dict
+        '''
 
     def __get_page_range_for_table_tag__(self, table_tag: str) -> Tuple[Optional[int], Optional[int]]:
         """Returns the page range (start, end) for a given table tag."""
@@ -1319,7 +1349,7 @@ class DocumentDataExtractor:
         match table_tag:
             case 'ccris_summary':
                 return (
-                    "Extract the following fields from the table with the heading 'C1: BANKING PAYMENT RECORDS (SOURCE: CCRIS, BANK NEGARA MALAYSIA)'. Under the subheading 'Summary of Potential & Current Liabilities', for the first row labeled 'As Borrower', extract the two values of total outstanding balance and total limit from the columns 'Outstanding' and 'Total Limit'. Do not confuse this with the second row labeled 'As Guarantor'. Do not confuse this with the third row labeled 'Total'. Extract the value ('Y' or 'N') for the field 'Special Attention Account' which is the last row of the table, under the column 'Outstanding'. If any of these fields are not present in the table, return null for that field. Return the extracted data in the following JSON format: {\"total_outstanding_balance\": value or null, \"total_limit\": value or null, \"special_attention_accounts\": value or null}."
+                    "Extract the following fields from the table with the heading 'C1: BANKING PAYMENT RECORDS (SOURCE: CCRIS, BANK NEGARA MALAYSIA)'. Under the subheading 'Summary of Potential & Current Liabilities', for the first row labeled 'As Borrower', extract the two values of total outstanding balance and total limit from the columns 'Outstanding' and 'Total Limit'. Do not confuse this with the second row labeled 'As Guarantor'. Do not confuse this with the third row labeled 'Total'. If the value is 0, it may be represented as a dash '-' or an en-dash '–' or an em-dash '—'. If the value is 0.00, return 0.00 and do not return null. Brackets surrounding a numerical value indicates that the numerical value is negative. Extract the value ('Y' or 'N') for the field 'Special Attention Account' which is the last row of the table, under the column 'Outstanding'. If any of these fields are not present in the table, return null for that field. Return the extracted data in the following JSON format: {\"total_outstanding_balance\": value or null, \"total_limit\": value or null, \"special_attention_accounts\": value or null}."
                 )
             case 'ccris_detail':
                 return (
@@ -1360,21 +1390,21 @@ class DocumentDataExtractor:
                 )
             case 'financials_and_shareholders':
                 return (
-                    "Extract the value of 'Paid-Up Capital (RM)' from the table with the heading 'Financials and Shareholders'. The first column of the table is the field name and the second column of the table is the value. If this field is not present in the table, return null for that field. Return the extracted data in the following JSON format: {\"paid_up_capital\": value or null}."
+                    "Extract the value of 'Paid-Up Capital (RM)' from the table with the heading 'Financials and Shareholders'. The first column of the table is the field name and the second column of the table is the value. If this field is not present in the table, return null for that field. If the value is 0, it may be represented as a dash '-' or an en-dash '–' or an em-dash '—'. If the value is 0.00, return 0.00 and do not return null. Brackets surrounding a numerical value indicates that the numerical value is negative. Return the extracted data in the following JSON format: {\"paid_up_capital\": value or null}."
                 )
             case 'financial_statements':
                 return (
                     "Attached are images of financial statements of a company. Each financial statement is a table. " 
                     "Each table has six columns, with the first column being the financial item and the second column being the value for the latest financial year. "
                     "We are only interested in the values for the latest financial year in the second column. "
-                    "Extract the following fields for the latest financial year (second column) from the tables, only if these exact fields are present. "
+                    "Extract the following fields for the latest financial year (second column) from the tables. "
                     "From the header, extract 'financial year end' in YYYY-MM-DD format. "
                     "From the balance sheet, extract 'non-current assets', 'current assets', 'total assets', 'non-current liabilities', 'current liabilities', 'long term liabilities', 'total liabilities'. "
                     "From the income statement, extract 'revenue', 'profit / (loss) after tax'. "
                     "From the liquidity ratios, extract 'current ratio'. "
                     "From the leverage ratios, extract 'gearing ratio' and 'debt to equity ratio [%]'. "
-                    "The values are in two decimal places. Brackets surrounding a value indicates that the value is negative. "
-                    "Ignore asterisks around values if present. "
+                    "The values are in two decimal places. Brackets surrounding a numerical value indicates that the numerical value is negative. "
+                    "Ignore asterisks around values if present. If the value is 0, it may be represented as a dash '-' or an en-dash '–' or an em-dash '—'. If the value is 0.00, return 0.00 and do not return null. Only return null if the field is not present in all the tables in all the images attached. "
                     "Due to OCR errors, some commas may be represented as periods, and vice versa. Always treat the right-most separator as the decimal point if ambiguous. "
                     "If any of these fields are not present in the tables, return null for that field. "
                     "Return the extracted data in the following JSON format: "
