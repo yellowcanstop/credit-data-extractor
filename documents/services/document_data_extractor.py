@@ -880,17 +880,30 @@ class DocumentDataExtractor:
 
         parsed_data = {}
         if self.report_type == ReportType.INDIVIDUAL:
+               
+            if extracted_data.get('ccris_conduct') is not None and extracted_data.get('total_outstanding_balance_1') is None and extracted_data.get('total_limit_1') is None:
+                details_image_data = self.extract_using_image('ccris_detail_edge_case')
+            else:
+                details_image_data = self.extract_using_image('ccris_detail')
+
+            if details_image_data:
+                if details_image_data.get('ccris_conduct') is not None:
+                    parsed_data['repayment_to_banks'] = self.__parse_conduct_values(details_image_data['ccris_conduct'])
+                
+                if extracted_data.get('total_outstanding_balance_1') is None and details_image_data.get('total_outstanding_balance_1') is not None:
+                    extracted_data['total_outstanding_balance_1'] = details_image_data['total_outstanding_balance_1']
+                
+                if extracted_data.get('total_limit_1') is None and details_image_data.get('total_limit_1') is not None:
+                    extracted_data['total_limit_1'] = details_image_data['total_limit_1']
+            else:
+                logger.error("CCRIS Details image extraction failed. Using fallback from document intelligence. This may impact the accuracy of these fields.")
             
             # parsed ccris_conduct from document intelligence is only used as a reference. The actual repayment_to_banks value is extracted from image extraction.
-            if extracted_data.get('ccris_conduct'):
-                parsed_data['repayment_to_banks'] = self.__parse_conduct_values(extracted_data['ccris_conduct'])
-
-            if extracted_data.get('ccris_conduct') is not None and extracted_data.get('total_outstanding_balance_1') is None and extracted_data.get('total_limit_1') is None:
-                ccris_conduct_image = self.extract_using_image('ccris_detail_edge_case')
-            else:
-                ccris_conduct_image = self.extract_using_image('ccris_detail')
-
-            
+            if parsed_data.get('repayment_to_banks') is None:
+                if extracted_data.get('ccris_conduct'):
+                    parsed_data['repayment_to_banks'] = self.__parse_conduct_values(extracted_data['ccris_conduct'])
+                else:
+                    logger.error("CCRIS Conduct data not found in both table and image extraction. Repayment to banks field will be missing.")
 
             util_keys = ['total_outstanding_balance_0', 'total_outstanding_balance_1', 'total_limit_0', 'total_limit_1']
             if all(extracted_data.get(key) is not None for key in util_keys):
@@ -962,13 +975,29 @@ class DocumentDataExtractor:
                 parsed_data['repayment_to_banks'] = 'N/A'
                 parsed_data['utilisation'] = 'N/A'
             else:
-                if extracted_data.get('ccris_conduct'):
-                    parsed_data['repayment_to_banks'] = self.__parse_conduct_values(extracted_data['ccris_conduct'])
-
                 if extracted_data.get('ccris_conduct') is not None and extracted_data.get('total_outstanding_balance_1') is None and extracted_data.get('total_limit_1') is None:
-                    self.extract_using_image('ccris_detail_edge_case')
+                    details_image_data = self.extract_using_image('ccris_detail_edge_case')
                 else:
-                    self.extract_using_image('ccris_detail')
+                    details_image_data = self.extract_using_image('ccris_detail')
+
+                if details_image_data:
+                    if details_image_data.get('ccris_conduct') is not None:
+                        parsed_data['repayment_to_banks'] = self.__parse_conduct_values(details_image_data['ccris_conduct'])
+                    
+                    if extracted_data.get('total_outstanding_balance_1') is None and details_image_data.get('total_outstanding_balance_1') is not None:
+                        extracted_data['total_outstanding_balance_1'] = details_image_data['total_outstanding_balance_1']
+                    
+                    if extracted_data.get('total_limit_1') is None and details_image_data.get('total_limit_1') is not None:
+                        extracted_data['total_limit_1'] = details_image_data['total_limit_1']
+                else:
+                    logger.error("CCRIS Details image extraction failed. Using fallback from document intelligence. This may impact the accuracy of these fields.")
+                
+                # parsed ccris_conduct from document intelligence is only used as a reference. The actual repayment_to_banks value is extracted from image extraction.
+                if parsed_data.get('repayment_to_banks') is None:
+                    if extracted_data.get('ccris_conduct'):
+                        parsed_data['repayment_to_banks'] = self.__parse_conduct_values(extracted_data['ccris_conduct'])
+                    else:
+                        logger.error("CCRIS Conduct data not found in both table and image extraction. Repayment to banks field will be missing.")
                 
                 util_keys = ['total_outstanding_balance_0', 'total_outstanding_balance_1', 'total_limit_0', 'total_limit_1']
                 if all(extracted_data.get(key) is not None for key in util_keys):
