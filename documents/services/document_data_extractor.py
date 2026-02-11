@@ -69,7 +69,7 @@ class DocumentDataExtractor:
         self.credential = credential
         self.result: AnalyzeResult = None
         self.report_type: ReportType = None
-        self.relevant_paras: Dict[str, int] = {}
+        self.relevant_bools: Dict[str, bool] = {}
         self.options: DocumentDataExtractorOptions = None
         self.bytes: bytes = None
         self.table_page_ranges: Dict[str, Tuple[int, int]] = {}
@@ -212,9 +212,6 @@ class DocumentDataExtractor:
             self.result: AnalyzeResult = poller.result()
             logger.info("Document Intelligence returned %d tables, %d paragraphs", len(self.result.tables or []), len(self.result.paragraphs or []))
 
-            self.relevant_paras.update(self.__find_paragraphs__())
-            logger.info("Identified relevant paragraphs: %s", self.relevant_paras)
-
             self.report_type = self.__classify_report_type__()
             logger.info("Classified report type as: %s", self.report_type.value)
 
@@ -250,50 +247,20 @@ class DocumentDataExtractor:
         - Commas are misread as periods: '2,091.202.00' -> '2091202.00'
         - Comma is used as decimal separator (European format): '1,22' -> '1.22'
         """
-        # Handle nil/dash values first
+        # Handle nil/dash values
         stripped = value.strip()
         if stripped == '-' or stripped == '–' or stripped == '—' or stripped == '':
             return '0'
         
-        # Remove all commas first (they're either thousand separators or OCR errors)
+        # Remove all commas: commas are either thousand separators or OCR errors
         stripped = stripped.replace(',', '')
         
         parts = stripped.split('.')
         if len(parts) <= 2:
             return stripped
-        # Multiple periods: all but the last are OCR'd commas
+        # Multiple periods: all but last period are commas since numbers are in 2 decimal places
         return ''.join(parts[:-1]) + '.' + parts[-1]
 
-    # TODO evaluate necessity of this since false positives
-    def __find_paragraphs__(self) -> Dict[str, int]:
-        """Locate relevant paragraphs since information is captured either as paragraphs or tables."""
-        relevant_paras = {}
-
-        if not self.result.paragraphs:
-            return relevant_paras
-        
-        num_paragraphs = len(self.result.paragraphs)
-        
-        for idx, para in enumerate(self.result.paragraphs):
-            para_text = para.content.strip().lower()
-
-            if idx + 1 >= num_paragraphs:
-                continue
-            
-            if self.__is_fuzzy_match__(para_text, 'c1: banking payment records (source: ccris, bank negara malaysia)'):
-                ccris = self.__find_paragraph_below_paragraph__(para, self.result.paragraphs)
-                if ccris and self.__is_fuzzy_match__(ccris, 'a check with bank negara malaysia returned no result on subject', 98):
-                    relevant_paras['ccris_not_available'] = idx
-            if self.__is_fuzzy_match__(para_text, 'd1: legal cases (subject as defendant)'):
-                defendant = self.__find_paragraph_below_paragraph__(para, self.result.paragraphs)
-                if defendant and self.__is_fuzzy_match__(defendant, 'no information available', 98):
-                    relevant_paras['legal_defendant_none'] = idx
-            if self.__is_fuzzy_match__(para_text, 'd2: legal cases (subject as plaintiff)'):
-                plaintiff = self.__find_paragraph_below_paragraph__(para, self.result.paragraphs)
-                if plaintiff and self.__is_fuzzy_match__(plaintiff, 'no information available', 98):
-                    relevant_paras['legal_plaintiff_none'] = idx
-        return relevant_paras
-    
     def __record_table_pages__(self, table_idx: int, table_tag: str):
         """Records the page range for a tagged table type."""
         table = self.result.tables[table_idx]
@@ -422,18 +389,27 @@ class DocumentDataExtractor:
             if cell.row_index == 0:
                 headers.append(cell.content.strip().lower())
         header_text = ' '.join(headers)
+
+        if self.__is_fuzzy_match__(header_text, 'c1: banking payment records (source: ccris, bank negara malaysia)' or self.__is_fuzzy_match__(header_text, 'ccris entity key') or self.__is_fuzzy_match__(header_text, 'ccris summary') or self.__is_fuzzy_match__(header_text, 'credit applications') or self.__is_fuzzy_match__(header_text, 'approved in past 12 months') or self.__is_fuzzy_match__(header_text, 'summary of potential & current liabilities') or self.__is_fuzzy_match__(header_text, 'as borrower')):
+            return [{'idx': table_idx, 'type': 'CCRIS_SUMMARY'}]
+            
+        if self.__is_fuzzy_match__(header_text, 'ccris details)') or self.__is_fuzzy_match__(header_text, 'loan information') or self.__is_fuzzy_match__(header_text, 'outstanding credit') or (self.__is_fuzzy_match__(header_text, 'no') and (table.column_count == 25 or table.column_count == 14)):
+            return self.__handle_ccris_details_tables__(table_idx)
         
+        if self.__is_fuzzy_match__(header_text, 'd1: legal cases (subject as defendant)'):
+            return [{'idx': table_idx, 'type': 'LEGAL_DEFENDANT'}]
+            
+        if self.__is_fuzzy_match__(header_text, 'd2: legal cases (subject as plaintiff)'):
+            return [{'idx': table_idx, 'type': 'LEGAL_PLAINTIFF'}]
+        
+        if self.__is_fuzzy_match__(header_text, 'e2: trade reference') or self.__is_fuzzy_match__(header_text, 'the following information are in relation to account no:') or self.__is_fuzzy_match__(header_text, '1. relationship') or self.__is_fuzzy_match__(header_text, '2. aging information'):
+            return [{'idx': table_idx, 'type': 'TRADE_REFERENCE'}]
+            
         if self.report_type == ReportType.INDIVIDUAL:
 
             if self.__is_fuzzy_match__(header_text, 'credit info at a glance') or self.__is_fuzzy_match__(header_text, 'credit info') or self.__is_fuzzy_match__(header_text, 'bankruptcy proceedings record'):
                 return [{'idx': table_idx, 'type': 'CREDIT_INFO_AT_A_GLANCE'}]
-            
-            if self.__is_fuzzy_match__(header_text, 'c1: banking payment records (source: ccris, bank negara malaysia)') or self.__is_fuzzy_match__(header_text, 'ccris entity key') or self.__is_fuzzy_match__(header_text, 'ccris summary') or self.__is_fuzzy_match__(header_text, 'credit applications') or self.__is_fuzzy_match__(header_text, 'approved in past 12 months') or self.__is_fuzzy_match__(header_text, 'summary of potential & current liabilities') or self.__is_fuzzy_match__(header_text, 'as borrower'):
-                return [{'idx': table_idx, 'type': 'CCRIS_SUMMARY'}]
-            
-            if self.__is_fuzzy_match__(header_text, 'ccris details)') or self.__is_fuzzy_match__(header_text, 'loan information') or self.__is_fuzzy_match__(header_text, 'outstanding credit') or (self.__is_fuzzy_match__(header_text, 'no') and table.column_count == 25):
-                return self.__handle_ccris_details_tables__(table_idx)
-            
+                        
         elif self.report_type == ReportType.COMPANY:
 
             if self.__is_fuzzy_match__(header_text, 'a: snapshot') or self.__is_fuzzy_match__(header_text, 'id verification') or self.__is_fuzzy_match__(header_text, 'company name (your input)') or self.__is_fuzzy_match__(header_text, 'business name (your input)'):
@@ -447,27 +423,30 @@ class DocumentDataExtractor:
             
             if (self.__is_fuzzy_match__(header_text, 'financial highlights') or self.__is_fuzzy_match__(header_text, 'financial year end') or self.__is_fuzzy_match__(header_text, 'date of tabling') or self.__is_fuzzy_match__(header_text, 'balance sheet') or self.__is_fuzzy_match__(header_text, 'non-current assets') or self.__is_fuzzy_match__(header_text, 'income statement') or self.__is_fuzzy_match__(header_text, 'revenue') or self.__is_fuzzy_match__(header_text, 'liquidity ratios') or self.__is_fuzzy_match__(header_text, 'current ratio')) and table.column_count == 6:
                 return [{'idx': table_idx, 'type': 'FINANCIAL_STATEMENTS'}]
-            
-            if self.__is_fuzzy_match__(header_text, 'c1: banking payment records (source: ccris, bank negara malaysia)' or self.__is_fuzzy_match__(header_text, 'ccris entity key') or self.__is_fuzzy_match__(header_text, 'ccris summary') or self.__is_fuzzy_match__(header_text, 'credit applications') or self.__is_fuzzy_match__(header_text, 'approved in past 12 months') or self.__is_fuzzy_match__(header_text, 'summary of potential & current liabilities') or self.__is_fuzzy_match__(header_text, 'as borrower')):
-                return [{'idx': table_idx, 'type': 'CCRIS_SUMMARY'}]
-            
-            if self.__is_fuzzy_match__(header_text, 'ccris details)') or self.__is_fuzzy_match__(header_text, 'loan information') or self.__is_fuzzy_match__(header_text, 'outstanding credit') or (self.__is_fuzzy_match__(header_text, 'no') and (table.column_count == 25 or table.column_count == 14)):
-                return self.__handle_ccris_details_tables__(table_idx)
 
         # Second try: Use preceding paragraph
         if preceding_text:
             preceding_lower = preceding_text.strip().lower()
 
+            if self.__is_fuzzy_match__(preceding_lower, 'c1: banking payment records (source: ccris, bank negara malaysia)') or self.__is_fuzzy_match__(preceding_lower, 'ccris entity key') or self.__is_fuzzy_match__(preceding_lower, 'ccris summary') or self.__is_fuzzy_match__(preceding_lower, 'credit applications') or self.__is_fuzzy_match__(preceding_lower, 'approved in past 12 months') or self.__is_fuzzy_match__(preceding_lower, 'summary of potential & current liabilities') or self.__is_fuzzy_match__(preceding_lower, 'as borrower'):
+                return [{'idx': table_idx, 'type': 'CCRIS_SUMMARY'}]
+                
+            if self.__is_fuzzy_match__(preceding_lower, 'ccris details)') or self.__is_fuzzy_match__(preceding_lower, 'loan information') or self.__is_fuzzy_match__(preceding_lower, 'outstanding credit') or (self.__is_fuzzy_match__(preceding_lower, 'no') and (table.column_count == 25 or table.column_count == 14)):
+                return self.__handle_ccris_details_tables__(table_idx)
+            
+            if self.__is_fuzzy_match__(preceding_lower, 'd1: legal cases (subject as defendant)'):
+                return [{'idx': table_idx, 'type': 'LEGAL_DEFENDANT'}]
+            
+            if self.__is_fuzzy_match__(preceding_lower, 'd2: legal cases (subject as plaintiff)'):
+                return [{'idx': table_idx, 'type': 'LEGAL_PLAINTIFF'}]
+            
+            if self.__is_fuzzy_match__(preceding_lower, 'e2: trade reference') or self.__is_fuzzy_match__(preceding_lower, 'the following information are in relation to account no:') or self.__is_fuzzy_match__(preceding_lower, '1. relationship') or self.__is_fuzzy_match__(preceding_lower, '2. aging information'):
+                return [{'idx': table_idx, 'type': 'TRADE_REFERENCE'}]
+        
             if self.report_type == ReportType.INDIVIDUAL:  
 
                 if self.__is_fuzzy_match__(preceding_lower, 'credit info at a glance') or self.__is_fuzzy_match__(preceding_lower, 'credit info') or self.__is_fuzzy_match__(preceding_lower, 'bankruptcy proceedings record'):
                     return [{'idx': table_idx, 'type': 'CREDIT_INFO_AT_A_GLANCE'}]
-                
-                if self.__is_fuzzy_match__(preceding_lower, 'c1: banking payment records (source: ccris, bank negara malaysia)') or self.__is_fuzzy_match__(preceding_lower, 'ccris entity key') or self.__is_fuzzy_match__(preceding_lower, 'ccris summary') or self.__is_fuzzy_match__(preceding_lower, 'credit applications') or self.__is_fuzzy_match__(preceding_lower, 'approved in past 12 months') or self.__is_fuzzy_match__(preceding_lower, 'summary of potential & current liabilities') or self.__is_fuzzy_match__(preceding_lower, 'as borrower'):
-                    return [{'idx': table_idx, 'type': 'CCRIS_SUMMARY'}]
-                
-                if self.__is_fuzzy_match__(preceding_lower, 'ccris details)') or self.__is_fuzzy_match__(preceding_lower, 'loan information') or self.__is_fuzzy_match__(preceding_lower, 'outstanding credit') or (self.__is_fuzzy_match__(preceding_lower, 'no') and (table.column_count == 25 or table.column_count == 14)):
-                    return self.__handle_ccris_details_tables__(table_idx)
                 
             elif self.report_type == ReportType.COMPANY:
 
@@ -482,12 +461,6 @@ class DocumentDataExtractor:
                 
                 if (self.__is_fuzzy_match__(preceding_lower, 'financial highlights') or self.__is_fuzzy_match__(preceding_lower, 'financial year end') or self.__is_fuzzy_match__(preceding_lower, 'date of tabling') or self.__is_fuzzy_match__(preceding_lower, 'balance sheet') or self.__is_fuzzy_match__(preceding_lower, 'non-current assets') or self.__is_fuzzy_match__(preceding_lower, 'income statement') or self.__is_fuzzy_match__(preceding_lower, 'revenue') or self.__is_fuzzy_match__(preceding_lower, 'liquidity ratios') or self.__is_fuzzy_match__(preceding_lower, 'current ratio')) and table.column_count == 6:
                     return [{'idx': table_idx, 'type': 'FINANCIAL_STATEMENTS'}]
-                
-                if self.__is_fuzzy_match__(preceding_lower, 'c1: banking payment records (source: ccris, bank negara malaysia)') or self.__is_fuzzy_match__(preceding_lower, 'ccris entity key') or self.__is_fuzzy_match__(preceding_lower, 'ccris summary') or self.__is_fuzzy_match__(preceding_lower, 'credit applications') or self.__is_fuzzy_match__(preceding_lower, 'approved in past 12 months') or self.__is_fuzzy_match__(preceding_lower, 'summary of potential & current liabilities') or self.__is_fuzzy_match__(preceding_lower, 'as borrower'):
-                    return [{'idx': table_idx, 'type': 'CCRIS_SUMMARY'}]
-                
-                if self.__is_fuzzy_match__(preceding_lower, 'ccris details)') or self.__is_fuzzy_match__(preceding_lower, 'loan information') or self.__is_fuzzy_match__(preceding_lower, 'outstanding credit') or (self.__is_fuzzy_match__(preceding_lower, 'no') and (table.column_count == 25 or table.column_count == 14)):
-                    return self.__handle_ccris_details_tables__(table_idx)
                 
         return [{'idx': table_idx, 'type': 'UNKNOWN'}]
 
@@ -785,7 +758,7 @@ class DocumentDataExtractor:
                         extracted_values['msic'] = " ".join(val.splitlines())
 
                 if self.__is_fuzzy_match__(row_key_text, 'business commenced') or self.__is_fuzzy_match__(row_key_text, 'last changed date') or self.__is_fuzzy_match__(row_key_text, 'rob search date') or self.__is_fuzzy_match__(row_key_text, 'current registration expiry date'):
-                    self.relevant_paras['partnership'] = True
+                    self.relevant_bools['partnership'] = True
         
         elif table_type == 'FINANCIALS_AND_SHAREHOLDERS':
             for r_idx in table:
@@ -1097,14 +1070,14 @@ class DocumentDataExtractor:
                         parsed_data['nature_of_business'] = snapshot_image_data['msic']
                     
                     if snapshot_image_data.get('is_partnership') == True:
-                        self.relevant_paras['partnership'] = True
+                        self.relevant_bools['partnership'] = True
 
             # DEBUG. CHECK WHICH KEYS ARE NOT PRESENT
             for key in ['years_in_business', 'type_of_company', 'nature_of_business']:
                 if parsed_data.get(key) is None:
                     logger.error("Key %s not found in parsed data", key)
 
-            if self.relevant_paras.get('partnership') is not None and parsed_data.get('type_of_company') == 'Non - Sdn Bhd':
+            if self.relevant_bools.get('partnership') is not None and parsed_data.get('type_of_company') == 'Non - Sdn Bhd':
                 parsed_data['paid_up_capital'] = 'N/A'
                 parsed_data['financial_report_date'] = 'N/A'
                 parsed_data['turnover'] = 'N/A'
