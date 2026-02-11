@@ -14,7 +14,7 @@ from azure.ai.documentintelligence import DocumentIntelligenceClient
 from azure.ai.documentintelligence.models import AnalyzeResult, DocumentContentFormat, DocumentAnalysisFeature
 from shared.confidence.confidence_utils import merge_confidence_values
 from shared.confidence.openai_confidence import evaluate_confidence as evaluate_confidence_openai
-from shared.confidence.document_intelligence_confidence import evaluate_confidence as evaluate_confidence_di
+from shared.confidence.document_intelligence_confidence import SearchContext, evaluate_confidence as evaluate_confidence_di
 from shared.confidence.confidence_result import ConfidenceResult, OVERALL_CONFIDENCE_KEY
 import logging
 
@@ -69,10 +69,11 @@ class DocumentDataExtractor:
         self.credential = credential
         self.result: AnalyzeResult = None
         self.report_type: ReportType = None
-        self.relevant_bools: Dict[str, bool] = {}
+        self.relevant_values: Dict = {}
         self.options: DocumentDataExtractorOptions = None
         self.bytes: bytes = None
         self.table_page_ranges: Dict[str, Tuple[int, int]] = {}
+        self.di_confidence: Dict = {}
 
     def __safe_get_cell__(self, table, r_idx: int, c_idx: int) -> Optional[str]:
         """Safely gets and strips a cell value from a table row, returning None if the cell doesn't exist."""
@@ -111,13 +112,6 @@ class DocumentDataExtractor:
             self.result: AnalyzeResult = poller.result()
             logger.info("Document Intelligence returned %d tables, %d paragraphs", len(self.result.tables or []), len(self.result.paragraphs or []))
 
-            '''
-            confidence_di = evaluate_confidence_di(
-                extract_result=response_obj_dict,
-                analyze_result=self.result
-            )
-            '''
-
             self.report_type = self.__classify_report_type__()
             logger.info("Classified report type as: %s", self.report_type.value)
 
@@ -126,6 +120,13 @@ class DocumentDataExtractor:
 
             extracted_data = self.__extract_from_tagged_tables__(tagged_tables)
             logger.info("Extracted data: %s", extracted_data)
+
+            confidence_di = evaluate_confidence_di(
+                extract_result=self.di_confidence,
+                analyze_result=self.result
+            )
+
+            logger.info("Document Intelligence confidence evaluation: %s", confidence_di)
 
             parsed_data = self.__parse_extracted_data__(extracted_data)
             logger.info("Parsed extracted data: %s", parsed_data)
@@ -167,15 +168,19 @@ class DocumentDataExtractor:
         # Multiple periods: all but last period are commas since numbers are in 2 decimal places
         return ''.join(parts[:-1]) + '.' + parts[-1]
 
-    def __record_table_pages__(self, table_idx: int, table_tag: str):
-        """Records the page range for a tagged table type."""
-        table = self.result.tables[table_idx]
+    def __get_page__(self, bounding_regions) -> Optional[Tuple[int, int]]:
+        """Gets the min and max page numbers from bounding regions."""
         pages = set()
-        for region in (table.bounding_regions or []):
+        for region in (bounding_regions or []):
             pages.add(region.page_number)
         if not pages:
             return
-        min_page, max_page = min(pages), max(pages)
+        return min(pages), max(pages)
+
+    def __record_table_pages__(self, table_idx: int, table_tag: str):
+        """Records the page range for a tagged table type."""
+        table = self.result.tables[table_idx]
+        min_page, max_page = self.__get_page__(table.bounding_regions)
         # Expand existing range if this tag was already seen (e.g. multi-page CCRIS_DETAILS_MULTI_MID tables)
         if table_tag in self.table_page_ranges:
             existing_min, existing_max = self.table_page_ranges[table_tag]
@@ -210,7 +215,8 @@ class DocumentDataExtractor:
                     logger.info("Tagged table index %d as type %s", idx_and_type[0]['idx'], idx_and_type[0]['type'])
                     tagged_tables.append({
                         'type': idx_and_type[0]['type'],
-                        'table': lookup_table
+                        'table': lookup_table,
+                        'raw_table': table
                     })
                     self.__record_table_pages__(idx_and_type[0]['idx'], idx_and_type[0]['type'])
             elif len(idx_and_type) > 1:
@@ -220,7 +226,8 @@ class DocumentDataExtractor:
                     logger.info("Tagged table index %d as type %s", item['idx'], item['type'])
                     tagged_tables.append({
                         'type': item['type'],
-                        'table': lookup_table
+                        'table': lookup_table,
+                        'raw_table': self.result.tables[item['idx']]
                     })
                     self.__record_table_pages__(item['idx'], item['type'])
         logger.info("Tagged %d tables after processing", len(tagged_tables))
@@ -382,7 +389,7 @@ class DocumentDataExtractor:
                     return [{'idx': table_idx, 'type': 'BUSINESS_PROFILE'}]
                 
                 if (self.__is_fuzzy_match__(preceding_lower, 'financial highlights') or self.__is_fuzzy_match__(preceding_lower, 'financial year end') or self.__is_fuzzy_match__(preceding_lower, 'date of tabling') or self.__is_fuzzy_match__(preceding_lower, 'balance sheet') or self.__is_fuzzy_match__(preceding_lower, 'non-current assets') or self.__is_fuzzy_match__(preceding_lower, 'income statement') or self.__is_fuzzy_match__(preceding_lower, 'revenue') or self.__is_fuzzy_match__(preceding_lower, 'liquidity ratios') or self.__is_fuzzy_match__(preceding_lower, 'current ratio')) and table.column_count == 6:
-                    self.relevant_bools['financial_statements'] = True
+                    self.relevant_values['financial_statements'] = True
                     return [{'idx': table_idx, 'type': 'FINANCIAL_STATEMENTS'}]
                 
         return [{'idx': table_idx, 'type': 'UNKNOWN'}]
@@ -460,30 +467,37 @@ class DocumentDataExtractor:
         """Extracts data from a single tagged table regardless of report type."""
         table_type = tagged_table['type']
         table = tagged_table['table']
+        raw_table = tagged_table['raw_table']
         
         extracted_values = {}
+
+        min_page, _ = self.__get_page__(raw_table.bounding_regions)
         
         if table_type == 'LEGAL_CASES':
-            if self.relevant_bools.get('legal_cases') is None:
-                self.relevant_bools['legal_cases'] = True
+            if self.relevant_values.get('legal_cases') is None:
+                self.relevant_values['legal_cases'] = True
         
         if table_type == 'LEGAL_CASES_SUMMARY':
-            if self.relevant_bools.get('legal_cases') is None:
-                self.relevant_bools['legal_cases'] = True
-            last_idx_str = table[-1].get(0, "").strip().replace(".", "")
+            if self.relevant_values.get('legal_cases') is None:
+                self.relevant_values['legal_cases'] = True
+            val = self.__safe_get_cell__(table, -1, 0)
+            last_idx_str = val.replace(".", "")
             if last_idx_str.isdigit():
-                extracted_values['legal_cases_count'] = int(last_idx_str)         
+                extracted_values['legal_cases_count'] = int(last_idx_str)    
+                self.di_confidence['legal_cases_count'] = SearchContext(val, page_number=min_page)     
                   
         if table_type == 'TRADE_REFERENCE':
-            if self.relevant_bools.get('trade_reference') is None:
-                self.relevant_bools['trade_reference'] = True
+            if self.relevant_values.get('trade_reference') is None:
+                self.relevant_values['trade_reference'] = True
 
         if table_type == 'TRADE_REFERENCE_SUMMARY':
-            if self.relevant_bools.get('trade_reference') is None:
-                self.relevant_bools['trade_reference'] = True
-            last_idx_str = table[-1].get(0, "").strip().replace(".", "")
+            if self.relevant_values.get('trade_reference') is None:
+                self.relevant_values['trade_reference'] = True
+            val = self.__safe_get_cell__(table, -1, 0)
+            last_idx_str = val.replace(".", "")
             if last_idx_str.isdigit():
                 extracted_values['trade_reference_count'] = int(last_idx_str)    
+                self.di_confidence['trade_reference_count'] = SearchContext(val, page_number=min_page)
          
         return extracted_values
 
@@ -491,59 +505,60 @@ class DocumentDataExtractor:
         """Extracts data from a single tagged table for individual report based on its type."""
         table_type = tagged_table['type']
         table = tagged_table['table']
+        raw_table = tagged_table['raw_table']
         
         extracted_values = {}
+
+        min_page, _ = self.__get_page__(raw_table.bounding_regions)
         
         if table_type == 'CREDIT_INFO_AT_A_GLANCE':
             for r_idx in table:
                 row_key_text = table[r_idx].get(0, "").strip().lower()
 
-                # TODO check if bankruptcy necessary
-                if self.__is_fuzzy_match__(row_key_text, 'bankruptcy proceedings record'):
-                    val = self.__safe_get_cell__(table, r_idx, 2)
-                    if val is not None:
-                        extracted_values['bankruptcy'] = val
-
                 if self.__is_fuzzy_match__(row_key_text, 'legal records in past 24 months (non-personal capacity)', 100):
                     val = self.__safe_get_cell__(table, r_idx, 2)
                     if val is not None:
                         extracted_values['legal_non_personal'] = val
+                        self.di_confidence['legal_non_personal'] = SearchContext(val, page_number=min_page)
                 
                 if self.__is_fuzzy_match__(row_key_text, 'legal records in past 24 months (personal capacity)', 100):
                     val = self.__safe_get_cell__(table, r_idx, 2)
                     if val is not None:
                         extracted_values['legal_personal'] = val
-
+                        self.di_confidence['legal_personal'] = SearchContext(val, page_number=min_page)
                 if self.__is_fuzzy_match__(row_key_text, 'special attention accounts'):
                     val = self.__safe_get_cell__(table, r_idx, 2)
                     if val is not None:
                         extracted_values['special_attention_accounts_0'] = val
+                        self.di_confidence['special_attention_accounts_0'] = SearchContext(val, page_number=min_page)
                   
         elif table_type == 'CCRIS_SUMMARY':
-            ccris_summary = self.__extract_from_ccris_summary__(table)
+            ccris_summary = self.__extract_from_ccris_summary__(table, raw_table)
             extracted_values.update(ccris_summary)
         
         elif table_type == 'CCRIS_DETAILS_SINGLE':
-            ccris_details = self.__extract_from_ccris_details_single__(table)
+            ccris_details = self.__extract_from_ccris_details_single__(table, raw_table)
             extracted_values.update(ccris_details)
 
         elif table_type == 'CCRIS_DETAILS_MULTI_START':
-            ccris_details = self.__extract_from_ccris_details_multi_start__(table)
+            ccris_details = self.__extract_from_ccris_details_multi_start__(table, raw_table)
             extracted_values.update(ccris_details)
         
         elif table_type == 'CCRIS_DETAILS_MULTI_MID':
-            ccris_details = self.__extract_from_ccris_details_multi_mid__(table)
+            ccris_details = self.__extract_from_ccris_details_multi_mid__(table, raw_table)
             extracted_values.update(ccris_details)
 
         elif table_type == 'CCRIS_DETAILS_MULTI_END':
-            ccris_details = self.__extract_from_ccris_details_multi_end__(table)
+            ccris_details = self.__extract_from_ccris_details_multi_end__(table, raw_table)
             extracted_values.update(ccris_details)
              
         return extracted_values
 
-    def __extract_from_ccris_summary__(self, table) -> Dict:
+    def __extract_from_ccris_summary__(self, table, raw_table) -> Dict:
         """Extracts data from CCRIS Summary table."""
         extracted_values = {}
+        min_page, _ = self.__get_page__(raw_table.bounding_regions)
+        
         for r_idx in table:
             row_key_text = table[r_idx].get(0, "").strip().lower()
             if self.__is_fuzzy_match__(row_key_text, 'as borrower'):
@@ -551,20 +566,24 @@ class DocumentDataExtractor:
                 val2 = self.__safe_get_cell__(table, r_idx, 2)
                 if val1 is not None:
                     extracted_values['total_outstanding_balance_0'] = val1
+                    self.di_confidence['total_outstanding_balance_0'] = SearchContext(val1, page_number=min_page)
                 if val2 is not None:
                     extracted_values['total_limit_0'] = val2
+                    self.di_confidence['total_limit_0'] = SearchContext(val2, page_number=min_page)
             
             if self.__is_fuzzy_match__(row_key_text, 'special attention account'):
                 val = self.__safe_get_cell__(table, r_idx, 1)
                 if val is not None:
                     extracted_values['special_attention_accounts_1'] = val
+                    self.di_confidence['special_attention_accounts_1'] = SearchContext(val, page_number=min_page)
         return extracted_values 
     
-    def __extract_from_ccris_details_single__(self, table) -> Dict:
+    def __extract_from_ccris_details_single__(self, table, raw_table) -> Dict:
         """Extracts data from CCRIS Details Single table."""
         extracted_values = {}
         end_row_idx = -1
         start_row_idx = -1
+        min_page, _ = self.__get_page__(raw_table.bounding_regions)
         for r_idx in table:
             row_key_text = table[r_idx].get(5, "").strip().lower()
             if self.__is_fuzzy_match__(row_key_text, 'total outstanding balance'):
@@ -572,8 +591,10 @@ class DocumentDataExtractor:
                 val8 = self.__safe_get_cell__(table, r_idx, 8)
                 if val6 is not None:
                     extracted_values['total_outstanding_balance_1'] = val6
+                    self.di_confidence['total_outstanding_balance_1'] = SearchContext(val6, page_number=min_page)
                 if val8 is not None:
                     extracted_values['total_limit_1'] = val8
+                    self.di_confidence['total_limit_1'] = SearchContext(val8, page_number=min_page)
                 end_row_idx = r_idx
 
         for r_idx in table:
@@ -582,11 +603,11 @@ class DocumentDataExtractor:
                 start_row_idx = r_idx + 1
 
         if (start_row_idx != -1 and end_row_idx != -1):
-            conduct_values = self.__extract_conduct__(table, start_row_idx, end_row_idx)
+            conduct_values = self.__extract_conduct__(table, start_row_idx, end_row_idx, raw_table)
             extracted_values['ccris_conduct'] = conduct_values
         return extracted_values
 
-    def __extract_from_ccris_details_multi_start__(self, table) -> Dict:
+    def __extract_from_ccris_details_multi_start__(self, table, raw_table) -> Dict:
         """Extracts data from CCRIS Details Multi Start table."""
         extracted_values = {}
         start_row_idx = -1
@@ -596,21 +617,22 @@ class DocumentDataExtractor:
                 start_row_idx = r_idx + 1
 
         if (start_row_idx != -1):
-            conduct_values = self.__extract_conduct__(table, start_row_idx, len(table))
+            conduct_values = self.__extract_conduct__(table, start_row_idx, len(table), raw_table)
             extracted_values['ccris_conduct'] = conduct_values
         return extracted_values
     
-    def __extract_from_ccris_details_multi_mid__(self, table) -> Dict:
+    def __extract_from_ccris_details_multi_mid__(self, table, raw_table) -> Dict:
         """Extracts data from CCRIS Details Multi Mid table."""
         extracted_values = {}
-        conduct_values = self.__extract_conduct__(table, 0, len(table))
+        conduct_values = self.__extract_conduct__(table, 0, len(table), raw_table)
         extracted_values['ccris_conduct'] = conduct_values
         return extracted_values
     
-    def __extract_from_ccris_details_multi_end__(self, table) -> Dict:
+    def __extract_from_ccris_details_multi_end__(self, table, raw_table) -> Dict:
         """Extracts data from CCRIS Details Multi End table."""
         extracted_values = {}
         end_row_idx = -1
+        min_page, _ = self.__get_page__(raw_table.bounding_regions)
         for r_idx in table:
             row_key_text = table[r_idx].get(5, "").strip().lower()
             if self.__is_fuzzy_match__(row_key_text, 'total outstanding balance'):
@@ -618,12 +640,14 @@ class DocumentDataExtractor:
                 val8 = self.__safe_get_cell__(table, r_idx, 8)
                 if val6 is not None:
                     extracted_values['total_outstanding_balance_1'] = val6
+                    self.di_confidence['total_outstanding_balance_1'] = SearchContext(val6, page_number=min_page)
                 if val8 is not None:
                     extracted_values['total_limit_1'] = val8
+                    self.di_confidence['total_limit_1'] = SearchContext(val8, page_number=min_page)
                 end_row_idx = r_idx
 
         if (end_row_idx != -1):
-            conduct_values = self.__extract_conduct__(table, 0, end_row_idx)
+            conduct_values = self.__extract_conduct__(table, 0, end_row_idx, raw_table)
             extracted_values['ccris_conduct'] = conduct_values
         return extracted_values
     
@@ -631,64 +655,64 @@ class DocumentDataExtractor:
         """Extracts data from a single tagged table for company report based on its type."""
         table_type = tagged_table['type']
         table = tagged_table['table']
+        raw_table = tagged_table['raw_table']
         
         extracted_values = {}
+
+        min_page, _ = self.__get_page__(raw_table.bounding_regions)
         
         if table_type == 'CREDIT_INFO_AT_A_GLANCE':
             for r_idx in table:
                 row_key_text = table[r_idx].get(0, "").strip().lower()
-
-                # TODO flag for human review
-                if self.__is_fuzzy_match__(row_key_text, 'winding up / bankruptcy proceedings record'):
-                    val2 = self.__safe_get_cell__(table, r_idx, 2)
-                    val3 = self.__safe_get_cell__(table, r_idx, 3)
-                    if val2 is not None:
-                        extracted_values['bankruptcy_entity'] = val2
-                    if val3 is not None:
-                        extracted_values['bankruptcy_rp'] = val3
 
                 if self.__is_fuzzy_match__(row_key_text, 'legal records in past 24 months (non-personal capacity)', 100):
                     val2 = self.__safe_get_cell__(table, r_idx, 2)
                     val3 = self.__safe_get_cell__(table, r_idx, 3)
                     if val2 is not None:
                         extracted_values['legal_non_personal_entity'] = val2
+                        self.di_confidence['legal_non_personal_entity'] = SearchContext(val2, page_number=min_page)
                     if val3 is not None:
                         extracted_values['legal_non_personal_rp'] = val3
+                        self.di_confidence['legal_non_personal_rp'] = SearchContext(val3, page_number=min_page)
                 
                 if self.__is_fuzzy_match__(row_key_text, 'legal records in past 24 months (personal capacity)', 100):
                     val2 = self.__safe_get_cell__(table, r_idx, 2)
                     val3 = self.__safe_get_cell__(table, r_idx, 3)
                     if val2 is not None:
                         extracted_values['legal_personal_entity'] = val2
+                        self.di_confidence['legal_personal_entity'] = SearchContext(val2, page_number=min_page)
                     if val3 is not None:
                         extracted_values['legal_personal_rp'] = val3
+                        self.di_confidence['legal_personal_rp'] = SearchContext(val3, page_number=min_page)
                    
                 if self.__is_fuzzy_match__(row_key_text, 'special attention accounts'):
                     val2 = self.__safe_get_cell__(table, r_idx, 2)
                     val3 = self.__safe_get_cell__(table, r_idx, 3)
                     if val2 is not None:
                         extracted_values['special_attention_accounts_entity'] = val2
+                        self.di_confidence['special_attention_accounts_entity'] = SearchContext(val2, page_number=min_page)
                     if val3 is not None:
                         extracted_values['special_attention_accounts_rp'] = val3
+                        self.di_confidence['special_attention_accounts_rp'] = SearchContext(val3, page_number=min_page)
                   
         elif table_type == 'CCRIS_SUMMARY':
-            ccris_summary = self.__extract_from_ccris_summary__(table)
+            ccris_summary = self.__extract_from_ccris_summary__(table, raw_table)
             extracted_values.update(ccris_summary)
         
         elif table_type == 'CCRIS_DETAILS_SINGLE':
-            ccris_details = self.__extract_from_ccris_details_single__(table)
+            ccris_details = self.__extract_from_ccris_details_single__(table, raw_table)
             extracted_values.update(ccris_details)
 
         elif table_type == 'CCRIS_DETAILS_MULTI_START':
-            ccris_details = self.__extract_from_ccris_details_multi_start__(table)
+            ccris_details = self.__extract_from_ccris_details_multi_start__(table, raw_table)
             extracted_values.update(ccris_details)
         
         elif table_type == 'CCRIS_DETAILS_MULTI_MID':
-            ccris_details = self.__extract_from_ccris_details_multi_mid__(table)
+            ccris_details = self.__extract_from_ccris_details_multi_mid__(table, raw_table)
             extracted_values.update(ccris_details)
 
         elif table_type == 'CCRIS_DETAILS_MULTI_END':
-            ccris_details = self.__extract_from_ccris_details_multi_end__(table)
+            ccris_details = self.__extract_from_ccris_details_multi_end__(table, raw_table)
             extracted_values.update(ccris_details)
        
         elif table_type == 'SNAPSHOT':
@@ -698,25 +722,29 @@ class DocumentDataExtractor:
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['registration_date'] = val
+                        self.di_confidence['registration_date'] = SearchContext(val, page_number=min_page)
                 
                 if self.__is_fuzzy_match__(row_key_text, 'type', 100):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['type'] = " ".join(val.splitlines())
+                        self.di_confidence['type'] = SearchContext(val, page_number=min_page)
                 
                 if self.__is_fuzzy_match__(row_key_text, 'type of company'):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['type'] = " ".join(val.splitlines())
+                        self.di_confidence['type'] = SearchContext(val, page_number=min_page)
 
                 if self.__is_fuzzy_match__(row_key_text, 'msic'):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['msic'] = " ".join(val.splitlines())
+                        self.di_confidence['msic'] = SearchContext(val, page_number=min_page)
 
                 if self.__is_fuzzy_match__(row_key_text, 'business commenced') or self.__is_fuzzy_match__(row_key_text, 'last changed date') or self.__is_fuzzy_match__(row_key_text, 'rob search date') or self.__is_fuzzy_match__(row_key_text, 'current registration expiry date'):
-                    if self.relevant_bools.get('partnership') is None:
-                        self.relevant_bools['partnership'] = True
+                    if self.relevant_values.get('partnership') is None:
+                        self.relevant_values['partnership'] = True
         
         elif table_type == 'DIRECTORS_OFFICERS':
             director_count = 0
@@ -725,10 +753,11 @@ class DocumentDataExtractor:
                 if self.__is_fuzzy_match__(row_key_text, 'ds'):
                     director_count += 1
             extracted_values['director_count'] = director_count
+            self.di_confidence['director_count'] = SearchContext('DS', page_number=min_page)
         
         elif table_type == 'BUSINESS_PROFILE':
-            if self.relevant_bools.get('partnership') is None:
-                self.relevant_bools['partnership'] = True
+            if self.relevant_values.get('partnership') is None:
+                self.relevant_values['partnership'] = True
             partner_count = 0
             for r_idx in table:
                 row_key_text = table[r_idx].get(0, "").strip().lower()
@@ -737,6 +766,7 @@ class DocumentDataExtractor:
                     if val is not None and self.__is_fuzzy_match__(val, 'partner'):
                         partner_count += 1
             extracted_values['partner_count'] = partner_count
+            self.di_confidence['partner_count'] = SearchContext('PARTNER', page_number=min_page)
 
         elif table_type == 'FINANCIALS_AND_SHAREHOLDERS':
             for r_idx in table:
@@ -745,14 +775,17 @@ class DocumentDataExtractor:
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['revenue_0'] = val
+                        self.di_confidence['revenue_0'] = SearchContext(val, page_number=min_page)
                 if self.__is_fuzzy_match__(row_key_text, 'profit after tax (rm)'):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['profit_after_tax_0'] = val
+                        self.di_confidence['profit_after_tax_0'] = SearchContext(val, page_number=min_page)
                 if self.__is_fuzzy_match__(row_key_text, 'paid up capital (rm)'):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['paid_up_capital'] = val
+                        self.di_confidence['paid_up_capital'] = SearchContext(val, page_number=min_page)
 
         elif table_type == 'FINANCIAL_STATEMENTS':
             for r_idx in table:
@@ -761,76 +794,91 @@ class DocumentDataExtractor:
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['financial_year_end'] = val
+                        self.di_confidence['financial_year_end'] = SearchContext(val, page_number=min_page)
                 
                 if self.__is_fuzzy_match__(row_key_text, 'non-current assets', 100):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['non_current_assets'] = val
+                        self.di_confidence['non_current_assets'] = SearchContext(val, page_number=min_page)
                     
                 if self.__is_fuzzy_match__(row_key_text, 'current assets', 100):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['current_assets'] = val
+                        self.di_confidence['current_assets'] = SearchContext(val, page_number=min_page)
                     
                 if self.__is_fuzzy_match__(row_key_text, 'total assets', 100):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['total_assets'] = val
+                        self.di_confidence['total_assets'] = SearchContext(val, page_number=min_page)
 
                 if self.__is_fuzzy_match__(row_key_text, 'non-current liabilities', 100):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['non_current_liabilities'] = val
+                        self.di_confidence['non_current_liabilities'] = SearchContext(val, page_number=min_page)
                 
                 if self.__is_fuzzy_match__(row_key_text, 'current liabilities', 100):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['current_liabilities'] = val
+                        self.di_confidence['current_liabilities'] = SearchContext(val, page_number=min_page)
                 
                 if self.__is_fuzzy_match__(row_key_text, 'long term liabilities', 100):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['long_term_liabilities'] = val
-                
+                        self.di_confidence['long_term_liabilities'] = SearchContext(val, page_number=min_page)
+
                 if self.__is_fuzzy_match__(row_key_text, 'total liabilities', 100):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['total_liabilities'] = val
+                        self.di_confidence['total_liabilities'] = SearchContext(val, page_number=min_page)
                      
                 if self.__is_fuzzy_match__(row_key_text, 'retained earning'):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['retained_earning'] = val
+                        self.di_confidence['retained_earning'] = SearchContext(val, page_number=min_page)
 
                 if self.__is_fuzzy_match__(row_key_text, 'net worth (ta - tl)'):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['net_worth'] = val
+                        self.di_confidence['net_worth'] = SearchContext(val, page_number=min_page)
                 
                 if self.__is_fuzzy_match__(row_key_text, 'revenue'):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['revenue_1'] = val
+                        self.di_confidence['revenue_1'] = SearchContext(val, page_number=min_page)
 
                 if self.__is_fuzzy_match__(row_key_text, 'profit / (loss) after tax', 100):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['profit_after_tax_1'] = val
+                        self.di_confidence['profit_after_tax_1'] = SearchContext(val, page_number=min_page)
 
                 if self.__is_fuzzy_match__(row_key_text, 'current ratio'):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['current_ratio'] = val
+                        self.di_confidence['current_ratio'] = SearchContext(val, page_number=min_page)
 
                 if self.__is_fuzzy_match__(row_key_text, 'gearing ratio'):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['gearing_ratio'] = val
+                        self.di_confidence['gearing_ratio'] = SearchContext(val, page_number=min_page)
 
                 if self.__is_fuzzy_match__(row_key_text, 'debt to equity ratio [%]'):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['debt_to_equity_ratio'] = val
+                        self.di_confidence['debt_to_equity_ratio'] = SearchContext(val, page_number=min_page)
 
         return extracted_values
 
@@ -885,7 +933,7 @@ class DocumentDataExtractor:
 
             legal_keys = ['legal_non_personal', 'legal_personal']
             if all(extracted_data.get(key) is not None for key in legal_keys):
-                if extracted_data['legal_non_personal'] == '0' and extracted_data['legal_personal'] == '0' and self.relevant_bools.get('legal_cases') is None:
+                if extracted_data['legal_non_personal'] == '0' and extracted_data['legal_personal'] == '0' and self.relevant_values.get('legal_cases') is None:
                     parsed_data['legal_cases'] = 0
                 else:
                     np = int(extracted_data['legal_non_personal'])
@@ -895,14 +943,14 @@ class DocumentDataExtractor:
                         if calc == extracted_data['legal_cases_count']:
                             parsed_data['legal_cases'] = calc
 
-            if self.relevant_bools.get('trade_reference') is not None:
+            if self.relevant_values.get('trade_reference') is not None:
                 if extracted_data.get('trade_reference_count') is not None:
                     parsed_data['blacklist'] = extracted_data['trade_reference_count']
                 else:
                     # trade reference table detected but count not extracted so try fallback
                     # TODO markdown
                     pass
-            elif self.relevant_bools.get('trade_reference') is None:
+            elif self.relevant_values.get('trade_reference') is None:
                 parsed_data['blacklist'] = 0
 
             # use ai as fallback. this needs to be async
@@ -1000,7 +1048,7 @@ class DocumentDataExtractor:
 
             legal_keys = ['legal_non_personal_entity', 'legal_personal_entity']
             if all(extracted_data.get(key) is not None for key in legal_keys):
-                if extracted_data['legal_non_personal_entity'] == '0' and extracted_data['legal_personal_entity'] == '0' and self.relevant_bools.get('legal_cases') is None:
+                if extracted_data['legal_non_personal_entity'] == '0' and extracted_data['legal_personal_entity'] == '0' and self.relevant_values.get('legal_cases') is None:
                     parsed_data['legal_cases'] = 0
                 else:
                     np = int(extracted_data['legal_non_personal_entity'])
@@ -1010,7 +1058,7 @@ class DocumentDataExtractor:
                         if calc == extracted_data['legal_cases_count']:
                             parsed_data['legal_cases'] = calc
 
-            if self.relevant_bools.get('trade_reference') is not None:
+            if self.relevant_values.get('trade_reference') is not None:
                 if extracted_data.get('trade_reference_count') is not None:
                     parsed_data['blacklist'] = extracted_data['trade_reference_count']
                 else:
@@ -1018,7 +1066,7 @@ class DocumentDataExtractor:
                     # TODO markdown
                     pass
             
-            if self.relevant_bools.get('trade_reference') is None:
+            if self.relevant_values.get('trade_reference') is None:
                 parsed_data['blacklist'] = 0
 
             if (parsed_data.get('special_attention_accounts') is None) or (parsed_data.get('legal_cases') is None):
@@ -1072,14 +1120,14 @@ class DocumentDataExtractor:
                         parsed_data['nature_of_business'] = snapshot_image_data['msic']
                     
                     if snapshot_image_data.get('is_partnership') == True:
-                        self.relevant_bools['partnership'] = True
+                        self.relevant_values['partnership'] = True
 
             # DEBUG. CHECK WHICH KEYS ARE NOT PRESENT
             for key in ['years_in_business', 'type_of_company', 'nature_of_business']:
                 if parsed_data.get(key) is None:
                     logger.error("Key %s not found in parsed data", key)
 
-            if self.relevant_bools.get('partnership') is not None and parsed_data.get('type_of_company') == 'Non - Sdn Bhd':
+            if self.relevant_values.get('partnership') is not None and parsed_data.get('type_of_company') == 'Non - Sdn Bhd':
                 # partnership form does not need paid_up_capital
                 #parsed_data['paid_up_capital'] = 'N/A'
                 parsed_data['financial_report_date'] = 'N/A'
@@ -1239,7 +1287,7 @@ class DocumentDataExtractor:
         """Maps parsed data keys to final output keys."""
         mapped_data = {}
         
-        if self.relevant_bools.get('financial_statements') is not None and self.relevant_bools.get('financial_statements') == True:
+        if self.relevant_values.get('financial_statements') is not None and self.relevant_values.get('financial_statements') == True:
             mapped_data['financial_report_provided'] = 'YES'
         else:
             mapped_data['financial_report_provided'] = 'NO'
@@ -1571,7 +1619,7 @@ class DocumentDataExtractor:
                     "Extract the following from the CCRIS details table: "
                     "1. 'total_outstanding_balance': The total outstanding balance value from the summary row at the bottom of the table, right before the subheading 'Special Attention Account'. "
                     "2. 'total_limit': The total limit value from the summary row at the bottom of the table, right before the subheading 'Special Attention Account'. "
-                    "3. 'ccris_conduct': For each loan row, extract the values (the numeric digits in the monthly columns under the column 'Conduct of Account For Last 12 Months'). There may be multiple loan rows. For each loan row, collect the values into a list of integers. For example, if there are two rows, with the first loan row having all 12 subcolumns populated with the digits shown and the second loan row having only 11 subcolumns populated with the digits shown, then the final ccris_conduct is [[0,0,1,0,0,0,0,0,2,0,0,0], [0,0,1,0,0,0,0,0,2,0,0,0]]. Therefore, if you see a missing month, skip it. Do not represent a missing month with a 0. If you are unsure of the individual digits extracted, then return null for ccris_conduct."
+                    "3. 'ccris_conduct': For each loan row, extract the values (the numeric digits in the monthly columns under the column 'Conduct of Account For Last 12 Months'). There may be multiple loan rows. For each loan row, collect the values into a list of integers. For example, if there are two rows, with the first loan row having all 12 subcolumns populated with the digits shown and the second loan row having only 11 subcolumns populated with the digits shown, then the final ccris_conduct is [[0,0,1,0,0,0,0,0,2,0,0,0], [0,0,1,0,0,0,0,0,2,0,0,0]]. Therefore, if you see a missing month, skip it. Do not represent a missing month with a 0. A non-zero digit is usually in a shaded or colored cell. A digit which is zero is usually in an unshaded or uncolored cell. If you are unsure of the individual digits extracted, then return null for ccris_conduct. Ensure that all loan rows are extracted, with reference to the markdown table and the images provided."
                     "Return the extracted data in the following JSON format: "
                     "{\"total_outstanding_balance\": value or null, \"total_limit\": value or null, \"ccris_conduct\": [list of conduct strings] or null}."
                 )
@@ -1583,18 +1631,18 @@ class DocumentDataExtractor:
                     "Extract the following from the CCRIS details table: "
                     "1. 'total_outstanding_balance': The total outstanding balance value from the summary row at the bottom of the table, right before the subheading 'Special Attention Account'. "
                     "2. 'total_limit': The total limit value from the summary row at the bottom of the table, right before the subheading 'Special Attention Account'. "
-                    "3. 'ccris_conduct': For each loan row, extract the values (the numeric digits in the monthly columns under the column 'Conduct of Account For Last 12 Months'). There may be multiple loan rows. For each loan row, collect the values into a list of integers. For example, if there are two rows, with the first loan row having all 12 subcolumns populated with the digits shown and the second loan row having only 11 subcolumns populated with the digits shown, then the final ccris_conduct is [[0,0,1,0,0,0,0,0,2,0,0,0], [0,0,1,0,0,0,0,0,2,0,0,0]]. Therefore, if you see a missing month, skip it. Do not represent a missing month with a 0. If you are unsure of the individual digits extracted, then return null for ccris_conduct."
+                    "3. 'ccris_conduct': For each loan row, extract the values (the numeric digits in the monthly columns under the column 'Conduct of Account For Last 12 Months'). There may be multiple loan rows. For each loan row, collect the values into a list of integers. For example, if there are two rows, with the first loan row having all 12 subcolumns populated with the digits shown and the second loan row having only 11 subcolumns populated with the digits shown, then the final ccris_conduct is [[0,0,1,0,0,0,0,0,2,0,0,0], [0,0,1,0,0,0,0,0,2,0,0,0]]. Therefore, if you see a missing month, skip it. Do not represent a missing month with a 0. A non-zero digit is usually in a shaded or colored cell. A digit which is zero is usually in an unshaded or uncolored cell. If you are unsure of the individual digits extracted, then return null for ccris_conduct. Ensure that all loan rows are extracted, with reference to the markdown table and the images provided."
                     "Return the extracted data in the following JSON format: "
                     "{\"total_outstanding_balance\": value or null, \"total_limit\": value or null, \"ccris_conduct\": [list of conduct strings] or null}."
                 )
             case 'credit_info_at_a_glance':
                 if self.report_type == ReportType.INDIVIDUAL:
                     return (
-                        "Extract the following fields from the table with the heading 'Credit Info at a Glance'. There are three columns: 'Credit Info', 'Source', 'Value'. We are only interested in the first column which shows the field names, and the third column 'Value' which shows the values for the entity. Extract the value for the field 'Bankruptcy Proceedings Record'. Extract the number of legal records in past 24 months (personal capacity) which is the first subrow for the field 'legal records in past 24 months (personal capacity)'. Extract the number of legal records in past 24 months (non-personal capacity) which is the first subrow for the field 'legal records in past 24 months (non-personal capacity)'. Extract the value for the field 'Special Attention Accounts'. If any of these fields are not present in the table, return null for that field. Return the extracted data in the following JSON format: {\"bankruptcy\": value or null, \"legal_personal\": value or null, \"legal_non_personal\": value or null, \"special_attention_accounts\": value or null}."
+                        "Extract the following fields from the table with the heading 'Credit Info at a Glance'. There are three columns: 'Credit Info', 'Source', 'Value'. We are only interested in the first column which shows the field names, and the third column 'Value' which shows the values for the entity. Extract the number of legal records in past 24 months (personal capacity) which is the first subrow for the field 'legal records in past 24 months (personal capacity)'. Extract the number of legal records in past 24 months (non-personal capacity) which is the first subrow for the field 'legal records in past 24 months (non-personal capacity)'. Extract the value for the field 'Special Attention Accounts'. If any of these fields are not present in the table, return null for that field. Return the extracted data in the following JSON format: {\"legal_personal\": value or null, \"legal_non_personal\": value or null, \"special_attention_accounts\": value or null}."
                     )
                 elif self.report_type == ReportType.COMPANY:
                     return (
-                        "Extract the following fields from the table with the heading 'Credit Info at a Glance'. There are four columns: 'Credit Info', 'Source', 'Entity', 'Related Parties'. We are only interested in the first column which shows the field names, and the third column 'Entity' which shows the values for the entity. Extract the Entity value for the field 'Winding Up / Bankruptcy Proceedings Record'. Extract the Entity's number of legal records in past 24 months (personal capacity) which is the first subrow for the field 'legal records in past 24 months (personal capacity)'. Extract the Entity's number of legal records in past 24 months (non-personal capacity) which is the first subrow for the field 'legal records in past 24 months (non-personal capacity)'. Extract the Entity value for the field 'Special Attention Accounts'. If any of these fields are not present in the table, return null for that field. Return the extracted data in the following JSON format: {\"bankruptcy_entity\": value or null, \"legal_personal_entity\": value or null, \"legal_non_personal_entity\": value or null, \"special_attention_accounts_entity\": value or null}."
+                        "Extract the following fields from the table with the heading 'Credit Info at a Glance'. There are four columns: 'Credit Info', 'Source', 'Entity', 'Related Parties'. We are only interested in the first column which shows the field names, and the third column 'Entity' which shows the values for the entity. Extract the Entity's number of legal records in past 24 months (personal capacity) which is the first subrow for the field 'legal records in past 24 months (personal capacity)'. Extract the Entity's number of legal records in past 24 months (non-personal capacity) which is the first subrow for the field 'legal records in past 24 months (non-personal capacity)'. Extract the Entity value for the field 'Special Attention Accounts'. If any of these fields are not present in the table, return null for that field. Return the extracted data in the following JSON format: {\"legal_personal_entity\": value or null, \"legal_non_personal_entity\": value or null, \"special_attention_accounts_entity\": value or null}."
                     )
             case 'snapshot':
                 return (
@@ -1739,15 +1787,18 @@ class DocumentDataExtractor:
         else:
             return 'Unsatisfactory ( Under SPA or consistently lapsed 2 months and above )'
 
-    def __extract_conduct__(self, table, start_row_idx: int, end_row_idx: int) -> List[str]:
+    def __extract_conduct__(self, table, start_row_idx: int, end_row_idx: int, raw_table) -> List[str]:
         """Extracts conduct information from CCRIS Details table."""
         conduct_values = []
+        min_page, _ = self.__get_page__(raw_table.bounding_regions)
         for r_idx in range(start_row_idx, end_row_idx):
             for c_idx in range(11, 23):
                 cell = table[r_idx].get(c_idx, "")
                 if cell:
                     cell = re.sub(r'\s+', '', cell.strip()) # remove all whitespace
                     conduct_values.append(cell)
+                    confidence_key = f'conduct_values_row_{r_idx}_col_{c_idx}'
+                    self.di_confidence[confidence_key] = SearchContext(cell, page_number=min_page)
         return conduct_values
 
     def __get_openai_client__(self, options: DocumentDataExtractorOptions) -> AzureOpenAI:

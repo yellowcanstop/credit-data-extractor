@@ -6,6 +6,10 @@ from shared.confidence.confidence_result import OVERALL_CONFIDENCE_KEY
 from shared.utils.value_utils import value_contains, value_match
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+class SearchContext:
+    def __init__(self, value, page_number=None):
+        self.value = value
+        self.page_number = page_number
 
 class DIDocumentLine(DocumentLine):
     """
@@ -285,6 +289,12 @@ def evaluate_confidence(
         Returns:
             dict: The confidence evaluation of the field value.
         """
+        page_filter = None
+        actual_value = value
+
+        if isinstance(value, SearchContext):
+            page_filter = value.page_number
+            actual_value = value.value
 
         if isinstance(value, dict):
             return {
@@ -298,7 +308,14 @@ def evaluate_confidence(
             ]
         else:
             matching_lines = find_matching_lines(
-                value, di_lines, value_matcher=value_match)
+                actual_value, di_lines, value_matcher=value_match)
+            
+            if page_filter is not None:
+                matching_lines = [
+                    line for line in matching_lines 
+                    if line.page_number == page_filter
+                ]
+                
             field_confidence_score = get_field_confidence_score(
                 scores=[match.confidence for match in matching_lines],
                 default_score=0.0,
@@ -308,10 +325,10 @@ def evaluate_confidence(
                 line.normalized_polygon for line in matching_lines
             ]
             return {
-                "confidence": field_confidence_score,
-                "matching_lines": matching_lines,
-                "normalized_polygons": normalized_polygons,
-                "value": value
+                "confidence": field_confidence_score
+                #"matching_lines": matching_lines,
+                #"normalized_polygons": normalized_polygons,
+                #"value": value
             }
 
     confidence = dict()
