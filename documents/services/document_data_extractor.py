@@ -301,6 +301,7 @@ class DocumentDataExtractor:
             if len(idx_and_type) == 1:
                 if idx_and_type[0]['type'] != 'UNKNOWN':
                     lookup_table = self.__convert_to_row_map__(table)   
+                    logger.info("Tagged table index %d as type %s", idx_and_type[0]['idx'], idx_and_type[0]['type'])
                     tagged_tables.append({
                         'type': idx_and_type[0]['type'],
                         'table': lookup_table
@@ -310,6 +311,7 @@ class DocumentDataExtractor:
                 # multi-page CCRIS Details tables identified
                 for item in idx_and_type:
                     lookup_table = self.__convert_to_row_map__(self.result.tables[item['idx']]) 
+                    logger.info("Tagged table index %d as type %s", item['idx'], item['type'])
                     tagged_tables.append({
                         'type': item['type'],
                         'table': lookup_table
@@ -396,13 +398,14 @@ class DocumentDataExtractor:
         if self.__is_fuzzy_match__(header_text, 'ccris details)') or self.__is_fuzzy_match__(header_text, 'loan information') or self.__is_fuzzy_match__(header_text, 'outstanding credit') or (self.__is_fuzzy_match__(header_text, 'no') and (table.column_count == 25 or table.column_count == 14)):
             return self.__handle_ccris_details_tables__(table_idx)
         
-        if self.__is_fuzzy_match__(header_text, 'd1: legal cases (subject as defendant)'):
-            return [{'idx': table_idx, 'type': 'LEGAL_DEFENDANT'}]
-            
-        if self.__is_fuzzy_match__(header_text, 'd2: legal cases (subject as plaintiff)'):
-            return [{'idx': table_idx, 'type': 'LEGAL_PLAINTIFF'}]
+        if self.__is_fuzzy_match__(header_text, 'd1: legal cases (subject as defendant)') or self.__is_fuzzy_match__(header_text, 'd2: legal cases (subject as plaintiff)'):
+            if table.column_count == 6: # summary table
+                return [{'idx': table_idx, 'type': 'LEGAL_CASES_SUMMARY'}]
+            return [{'idx': table_idx, 'type': 'LEGAL_CASES'}]
         
         if self.__is_fuzzy_match__(header_text, 'e2: trade reference') or self.__is_fuzzy_match__(header_text, 'the following information are in relation to account no:') or self.__is_fuzzy_match__(header_text, '1. relationship') or self.__is_fuzzy_match__(header_text, '2. aging information'):
+            if table.column_count == 6: # summary table
+                return [{'idx': table_idx, 'type': 'TRADE_REFERENCE_SUMMARY'}]
             return [{'idx': table_idx, 'type': 'TRADE_REFERENCE'}]
             
         if self.report_type == ReportType.INDIVIDUAL:
@@ -434,11 +437,8 @@ class DocumentDataExtractor:
             if self.__is_fuzzy_match__(preceding_lower, 'ccris details)') or self.__is_fuzzy_match__(preceding_lower, 'loan information') or self.__is_fuzzy_match__(preceding_lower, 'outstanding credit') or (self.__is_fuzzy_match__(preceding_lower, 'no') and (table.column_count == 25 or table.column_count == 14)):
                 return self.__handle_ccris_details_tables__(table_idx)
             
-            if self.__is_fuzzy_match__(preceding_lower, 'd1: legal cases (subject as defendant)'):
-                return [{'idx': table_idx, 'type': 'LEGAL_DEFENDANT'}]
-            
-            if self.__is_fuzzy_match__(preceding_lower, 'd2: legal cases (subject as plaintiff)'):
-                return [{'idx': table_idx, 'type': 'LEGAL_PLAINTIFF'}]
+            if self.__is_fuzzy_match__(preceding_lower, 'd1: legal cases (subject as defendant)') or self.__is_fuzzy_match__(preceding_lower, 'd2: legal cases (subject as plaintiff)'):
+                return [{'idx': table_idx, 'type': 'LEGAL_CASES'}]
             
             if self.__is_fuzzy_match__(preceding_lower, 'e2: trade reference') or self.__is_fuzzy_match__(preceding_lower, 'the following information are in relation to account no:') or self.__is_fuzzy_match__(preceding_lower, '1. relationship') or self.__is_fuzzy_match__(preceding_lower, '2. aging information'):
                 return [{'idx': table_idx, 'type': 'TRADE_REFERENCE'}]
@@ -522,6 +522,9 @@ class DocumentDataExtractor:
         """Extracts data from tagged tables"""
         extracted = {}
         for tagged_table in tagged_tables:
+            gen = self.__extract_from_table_general__(tagged_table)
+            extracted.update(gen)
+
             if (self.report_type == ReportType.INDIVIDUAL):
                 values = self.__extract_from_table_individual__(tagged_table)
             elif (self.report_type == ReportType.COMPANY):
@@ -529,6 +532,37 @@ class DocumentDataExtractor:
             
             extracted.update(values)
         return extracted
+
+    def __extract_from_table_general__(self, tagged_table: Dict) -> Dict:
+        """Extracts data from a single tagged table regardless of report type."""
+        table_type = tagged_table['type']
+        table = tagged_table['table']
+        
+        extracted_values = {}
+        
+        if table_type == 'LEGAL_CASES':
+            if self.relevant_bools.get('legal_cases') is None:
+                self.relevant_bools['legal_cases'] = True
+        
+        if table_type == 'LEGAL_CASES_SUMMARY':
+            if self.relevant_bools.get('legal_cases') is None:
+                self.relevant_bools['legal_cases'] = True
+            last_idx_str = table[-1].get(0, "").strip().replace(".", "")
+            if last_idx_str.isdigit():
+                extracted_values['legal_cases_count'] = int(last_idx_str)         
+                  
+        if table_type == 'TRADE_REFERENCE':
+            if self.relevant_bools.get('trade_reference') is None:
+                self.relevant_bools['trade_reference'] = True
+
+        if table_type == 'TRADE_REFERENCE_SUMMARY':
+            if self.relevant_bools.get('trade_reference') is None:
+                self.relevant_bools['trade_reference'] = True
+            last_idx_str = table[-1].get(0, "").strip().replace(".", "")
+            if last_idx_str.isdigit():
+                extracted_values['trade_reference_count'] = int(last_idx_str)    
+         
+        return extracted_values
 
     def __extract_from_table_individual__(self, tagged_table: Dict) -> Dict:
         """Extracts data from a single tagged table for individual report based on its type."""
@@ -907,14 +941,25 @@ class DocumentDataExtractor:
 
             legal_keys = ['legal_non_personal', 'legal_personal']
             if all(extracted_data.get(key) is not None for key in legal_keys):
-                if extracted_data['legal_non_personal'] == '0' and extracted_data['legal_personal'] == '0':
+                if extracted_data['legal_non_personal'] == '0' and extracted_data['legal_personal'] == '0' and self.relevant_bools.get('legal_cases') is None:
                     parsed_data['legal_cases'] = 0
                 else:
                     np = int(extracted_data['legal_non_personal'])
                     p = int(extracted_data['legal_personal'])
-                    parsed_data['legal_cases'] = np + p
+                    calc = np + p
+                    if extracted_data.get('legal_cases_count') is not None:
+                        if calc == extracted_data['legal_cases_count']:
+                            parsed_data['legal_cases'] = calc
 
-            # TODO check blacklist
+            if self.relevant_bools.get('trade_reference') is not None:
+                if extracted_data.get('trade_reference_count') is not None:
+                    parsed_data['blacklist'] = extracted_data['trade_reference_count']
+                else:
+                    # trade reference table detected but count not extracted so try fallback
+                    # TODO markdown
+                    pass
+            elif self.relevant_bools.get('trade_reference') is None:
+                parsed_data['blacklist'] = 0
 
             # use ai as fallback. this needs to be async
             if parsed_data.get('utilisation') is None:
@@ -1009,13 +1054,28 @@ class DocumentDataExtractor:
             if extracted_data.get('special_attention_accounts_entity') is not None:
                 parsed_data['special_attention_accounts'] = extracted_data['special_attention_accounts_entity']
 
-            if extracted_data.get('legal_non_personal_entity') is not None and extracted_data.get('legal_personal_entity') is not None:
-                if extracted_data['legal_non_personal_entity'] == '0' and extracted_data['legal_personal_entity'] == '0':
+            legal_keys = ['legal_non_personal_entity', 'legal_personal_entity']
+            if all(extracted_data.get(key) is not None for key in legal_keys):
+                if extracted_data['legal_non_personal_entity'] == '0' and extracted_data['legal_personal_entity'] == '0' and self.relevant_bools.get('legal_cases') is None:
                     parsed_data['legal_cases'] = 0
                 else:
                     np = int(extracted_data['legal_non_personal_entity'])
                     p = int(extracted_data['legal_personal_entity'])
-                    parsed_data['legal_cases'] = np + p
+                    calc = np + p
+                    if extracted_data.get('legal_cases_count') is not None:
+                        if calc == extracted_data['legal_cases_count']:
+                            parsed_data['legal_cases'] = calc
+
+            if self.relevant_bools.get('trade_reference') is not None:
+                if extracted_data.get('trade_reference_count') is not None:
+                    parsed_data['blacklist'] = extracted_data['trade_reference_count']
+                else:
+                    # trade reference table detected but count not extracted so try fallback
+                    # TODO markdown
+                    pass
+            
+            if self.relevant_bools.get('trade_reference') is None:
+                parsed_data['blacklist'] = 0
 
             if (parsed_data.get('special_attention_accounts') is None) or (parsed_data.get('legal_cases') is None):
                 logger.info("Special attention accounts or legal cases not found from table extraction, falling back to image extraction")
@@ -1040,8 +1100,6 @@ class DocumentDataExtractor:
             for key in ['special_attention_accounts', 'legal_cases', 'utilisation', 'repayment_to_banks']:
                 if parsed_data.get(key) is None:
                     logger.error("Key %s not found in parsed data", key)
-
-            # TODO check blacklist
 
             if extracted_data.get('registration_date') is not None:
                 parsed_data['years_in_business'] = self.__calculate_years__(extracted_data['registration_date'])
