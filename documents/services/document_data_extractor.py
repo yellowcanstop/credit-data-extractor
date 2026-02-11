@@ -502,7 +502,7 @@ class DocumentDataExtractor:
             if self.__is_fuzzy_match__(kw_text, 'date of birth') or self.__is_fuzzy_match__(kw_text, 'nationality'):
                 return ReportType.INDIVIDUAL
         return ReportType.COMPANY
-        
+
     def __convert_to_row_map__(self, table):
         """Converts flat cells to nested dictionary with row_index as key and column_index as sub-key."""
         row_map = {}
@@ -513,7 +513,7 @@ class DocumentDataExtractor:
                 row_map[row_idx] = {}
             row_map[row_idx][col_idx] = cell.content
         return row_map
-   
+
     def __handle_ccris_details_tables__(self, table_idx: int) -> List[Dict]:
         """Handles multi-page CCRIS Details tables by tagging them appropriately."""
         next_tables = self.__detect_ccris_details_tables__(table_idx)
@@ -574,12 +574,12 @@ class DocumentDataExtractor:
                     if val is not None:
                         extracted_values['bankruptcy'] = val
 
-                if self.__is_fuzzy_match__(row_key_text, 'legal records in past 24 months (non-personal capacity)'):
+                if self.__is_fuzzy_match__(row_key_text, 'legal records in past 24 months (non-personal capacity)', 100):
                     val = self.__safe_get_cell__(table, r_idx, 2)
                     if val is not None:
                         extracted_values['legal_non_personal'] = val
                 
-                if self.__is_fuzzy_match__(row_key_text, 'legal records in past 24 months (personal capacity)'):
+                if self.__is_fuzzy_match__(row_key_text, 'legal records in past 24 months (personal capacity)', 100):
                     val = self.__safe_get_cell__(table, r_idx, 2)
                     if val is not None:
                         extracted_values['legal_personal'] = val
@@ -717,7 +717,7 @@ class DocumentDataExtractor:
                     if val3 is not None:
                         extracted_values['bankruptcy_rp'] = val3
 
-                if self.__is_fuzzy_match__(row_key_text, 'legal records in past 24 months (non-personal capacity)'):
+                if self.__is_fuzzy_match__(row_key_text, 'legal records in past 24 months (non-personal capacity)', 100):
                     val2 = self.__safe_get_cell__(table, r_idx, 2)
                     val3 = self.__safe_get_cell__(table, r_idx, 3)
                     if val2 is not None:
@@ -725,7 +725,7 @@ class DocumentDataExtractor:
                     if val3 is not None:
                         extracted_values['legal_non_personal_rp'] = val3
                 
-                if self.__is_fuzzy_match__(row_key_text, 'legal records in past 24 months (personal capacity)'):
+                if self.__is_fuzzy_match__(row_key_text, 'legal records in past 24 months (personal capacity)', 100):
                     val2 = self.__safe_get_cell__(table, r_idx, 2)
                     val3 = self.__safe_get_cell__(table, r_idx, 3)
                     if val2 is not None:
@@ -811,37 +811,37 @@ class DocumentDataExtractor:
                     if val is not None:
                         extracted_values['financial_year_end'] = val
                 
-                if self.__is_fuzzy_match__(row_key_text, 'non-current assets', 95):
+                if self.__is_fuzzy_match__(row_key_text, 'non-current assets', 100):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['non_current_assets'] = val
                     
-                if self.__is_fuzzy_match__(row_key_text, 'current assets', 95):
+                if self.__is_fuzzy_match__(row_key_text, 'current assets', 100):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['current_assets'] = val
                     
-                if self.__is_fuzzy_match__(row_key_text, 'total assets', 95):
+                if self.__is_fuzzy_match__(row_key_text, 'total assets', 100):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['total_assets'] = val
 
-                if self.__is_fuzzy_match__(row_key_text, 'non-current liabilities', 95):
+                if self.__is_fuzzy_match__(row_key_text, 'non-current liabilities', 100):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['non_current_liabilities'] = val
                 
-                if self.__is_fuzzy_match__(row_key_text, 'current liabilities', 95):
+                if self.__is_fuzzy_match__(row_key_text, 'current liabilities', 100):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['current_liabilities'] = val
                 
-                if self.__is_fuzzy_match__(row_key_text, 'long term liabilities', 95):
+                if self.__is_fuzzy_match__(row_key_text, 'long term liabilities', 100):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['long_term_liabilities'] = val
                 
-                if self.__is_fuzzy_match__(row_key_text, 'total liabilities', 95):
+                if self.__is_fuzzy_match__(row_key_text, 'total liabilities', 100):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['total_liabilities'] = val
@@ -861,7 +861,7 @@ class DocumentDataExtractor:
                     if val is not None:
                         extracted_values['revenue_1'] = val
 
-                if self.__is_fuzzy_match__(row_key_text, 'profit / (loss) after tax'):
+                if self.__is_fuzzy_match__(row_key_text, 'profit / (loss) after tax', 100):
                     val = self.__safe_get_cell__(table, r_idx, 1)
                     if val is not None:
                         extracted_values['profit_after_tax_1'] = val
