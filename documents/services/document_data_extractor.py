@@ -223,6 +223,8 @@ class DocumentDataExtractor:
 
             parsed_data = self.__parse_extracted_data__(extracted_data)
             logger.info("Parsed extracted data: %s", parsed_data)
+
+            mapped_data = self.__map_parsed_data__(parsed_data)
             logger.info("Completed extraction successfully")
 
         except Exception as e:
@@ -232,7 +234,7 @@ class DocumentDataExtractor:
         # TODO if openai is low confidence, escalate to human review
         
         # Convert Decimal values to float for JSON serialization
-        return {k: float(v) if isinstance(v, Decimal) else v for k, v in parsed_data.items()}
+        return {k: float(v) if isinstance(v, Decimal) else v for k, v in mapped_data.items()}
     
     def __to_decimal__(self, value) -> Decimal:
         """Converts a value to Decimal. Skips string normalization if value is already numeric."""
@@ -476,6 +478,7 @@ class DocumentDataExtractor:
                     return [{'idx': table_idx, 'type': 'BUSINESS_PROFILE'}]
                 
                 if (self.__is_fuzzy_match__(preceding_lower, 'financial highlights') or self.__is_fuzzy_match__(preceding_lower, 'financial year end') or self.__is_fuzzy_match__(preceding_lower, 'date of tabling') or self.__is_fuzzy_match__(preceding_lower, 'balance sheet') or self.__is_fuzzy_match__(preceding_lower, 'non-current assets') or self.__is_fuzzy_match__(preceding_lower, 'income statement') or self.__is_fuzzy_match__(preceding_lower, 'revenue') or self.__is_fuzzy_match__(preceding_lower, 'liquidity ratios') or self.__is_fuzzy_match__(preceding_lower, 'current ratio')) and table.column_count == 6:
+                    self.relevant_bools['financial_statements'] = True
                     return [{'idx': table_idx, 'type': 'FINANCIAL_STATEMENTS'}]
                 
         return [{'idx': table_idx, 'type': 'UNKNOWN'}]
@@ -1173,7 +1176,8 @@ class DocumentDataExtractor:
                     logger.error("Key %s not found in parsed data", key)
 
             if self.relevant_bools.get('partnership') is not None and parsed_data.get('type_of_company') == 'Non - Sdn Bhd':
-                parsed_data['paid_up_capital'] = 'N/A'
+                # partnership form does not need paid_up_capital
+                #parsed_data['paid_up_capital'] = 'N/A'
                 parsed_data['financial_report_date'] = 'N/A'
                 parsed_data['turnover'] = 'N/A'
                 parsed_data['net_profit'] = 'N/A'
@@ -1326,6 +1330,183 @@ class DocumentDataExtractor:
                                 logger.error("Gearing ratio validation failed in image extraction")
 
         return parsed_data   
+    
+    def __map_parsed_data__(self, parsed_data: Dict):
+        """Maps parsed data keys to final output keys."""
+        mapped_data = {}
+        
+        if self.relevant_bools.get('financial_statements') is not None and self.relevant_bools.get('financial_statements') == True:
+            mapped_data['financial_report_provided'] = 'YES'
+        else:
+            mapped_data['financial_report_provided'] = 'NO'
+
+        for key, value in parsed_data.items():
+
+            if key == 'repayment_to_banks':
+                # override if there is SPA
+                if parsed_data.get('special_attention_accounts') is not None and parsed_data.get('special_attention_accounts') == 'YES':
+                    mapped_data['repayment_to_banks'] = 'Unsatisfactory ( Under SPA or consistently lapsed 2 months and above )'
+                else:
+                    mapped_data['repayment_to_banks'] = value
+
+            elif key == 'utilisation':
+                if value == 0:
+                    if self.report_type == ReportType.INDIVIDUAL:
+                        mapped_data['utilisation'] = '0%'
+                    else:
+                        mapped_data['utilisation'] = '0% ( No outstanding balance )'
+                elif 1 <= value <= 25:
+                    mapped_data['utilisation'] = '( 1% - 25% )'
+                elif 26 <= value <= 50:
+                    mapped_data['utilisation'] = '( 26% - 50% )'
+                elif 51 <= value <= 75:
+                    mapped_data['utilisation'] = '( 51% - 75% )'
+                elif 76 <= value <= 100:
+                    mapped_data['utilisation'] = '( 76% - 100% )'
+                else:
+                    mapped_data['utilisation'] = 'N/A'
+
+            elif key == 'special_attention_accounts':
+                mapped_data['special_attention_accounts'] = value
+
+            elif key == 'legal_cases':
+                if value == 0:
+                    mapped_data['legal_cases'] = '0 ( Clean of legal action )'
+                elif value == 1:
+                    mapped_data['legal_cases'] = '1 ( 1 case still on-going or unsettled )'
+                elif value == 2:
+                    mapped_data['legal_cases'] = '2 ( 2 cases still on-going or unsettled )'
+                elif value == 3:
+                    mapped_data['legal_cases'] = '3 ( 3 cases still on-going or unsettled )'
+                else:
+                    mapped_data['legal_cases'] = '>3 ( More than 3 cases still on-going or unsettled )'
+
+            elif key == 'blacklist':
+                if value == 0:
+                    mapped_data['blacklist_cases'] = '0 ( no blacklist issue )'
+                elif value == 1:
+                    mapped_data['blacklist_cases'] = '1 ( 1 blacklist issue )'
+                elif value == 2:
+                    mapped_data['blacklist_cases'] = '2 ( 2 blacklist issue )'
+                elif value == 3:
+                    mapped_data['blacklist_cases'] = '3 ( 3 blacklist issue )'
+                else:
+                    mapped_data['blacklist_cases'] = '>3 ( More than 3 blacklist issue )'
+                    
+            elif key == 'years_in_business':
+                if value < 2:
+                    mapped_data['years_in_business'] = '< 2 Years'
+                elif 2 <= value <= 5:
+                    mapped_data['years_in_business'] = '2.1 - 5 Years'
+                elif 5 < value <= 7:
+                    mapped_data['years_in_business'] = '5.1 - 7 Years'
+                elif 7 < value <= 10:
+                    mapped_data['years_in_business'] = '7.1 - 10 years'
+                else:
+                    mapped_data['years_in_business'] = '> 10 Years'
+
+            elif key == 'type_of_company':
+                mapped_data['type_of_company'] = value
+
+            elif key == 'nature_of_business':
+                # TODO map MSIC to category
+                mapped_data['nature_of_business'] = value
+
+            elif key == 'number_of_directors_or_partners':
+                mapped_data['number_of_directors_or_partners'] = value
+
+            elif key == 'paid_up_capital':
+                # partnership (or non sdn bhd) form does not need paid_up_capital
+                if value < 2:
+                    mapped_data['paid_up_capital'] = '< 2K'
+                elif 2 <= value <= 150999:
+                    mapped_data['paid_up_capital'] = '2K - 150K'
+                elif 151000 <= value <= 300999:
+                    mapped_data['paid_up_capital'] = '151K - 300K'
+                elif 301000 <= value <= 750000:
+                    mapped_data['paid_up_capital'] = '301K - 750K'
+                else:
+                    mapped_data['paid_up_capital'] = '> 750K'
+
+            elif key == 'financial_report_date':
+                mapped_data['financial_report_date'] = value
+
+            elif key == 'turnover':
+                mapped_data['turnover_amount'] = value
+                if value > 0:
+                    mapped_data['turnover'] = 'Positive'
+                else:
+                    mapped_data['turnover'] = 'Negative'
+
+            elif key == 'net_profit':
+                mapped_data['net_profit_amount'] = value
+                if value == 'N/A':
+                    mapped_data['net_profit'] = 'Negative or N/A ( Make loss company or Not available)'
+                elif value < 0:
+                    mapped_data['net_profit'] = 'Negative or N/A ( Make loss company or Not available)'
+                elif 0 <= value <= 300999:
+                    mapped_data['net_profit'] = '0 - 300K'
+                elif 301000 <= value <= 500999:
+                    mapped_data['net_profit'] = '301K - 500K'
+                elif 501000 <= value <= 999999:
+                    mapped_data['net_profit'] = '501K - 999K'
+                else:
+                    mapped_data['net_profit'] = '> 1 Mil'
+                
+            elif key == 'retained_profit':
+                mapped_data['retained_profit_amount'] = value
+                if value == 'N/A':
+                    mapped_data['retained_profit'] = 'Negative or N/A ( Making accumulated losses or Not available )'
+                elif value < 0:
+                    mapped_data['retained_profit'] = 'Negative or N/A ( Making accumulated losses or Not available )'
+                else:
+                    mapped_data['retained_profit'] = 'Positive'
+
+            elif key == 'net_worth':
+                mapped_data['net_worth_amount'] = value
+                if value == 'N/A':
+                    mapped_data['net_worth'] = 'Negative or N/a ( Is an insolvent company or Not available)'
+                elif value < 0:
+                    mapped_data['net_worth'] = 'Negative or N/a ( Is an insolvent company or Not available)'
+                else:
+                    mapped_data['net_worth'] = 'Positive'
+
+            elif key == 'net_current_assets':
+                mapped_data['net_current_assets_amount'] = value
+                if value == 'N/A':
+                    mapped_data['net_current_assets'] = '( Negative working capital / Not available )'
+                elif value < 0:
+                    mapped_data['net_current_assets'] = '( Negative working capital / Not available )'
+                else:
+                    mapped_data['net_current_assets'] = 'Positive'
+
+            elif key == 'current_ratio':
+                if value < 1:
+                    mapped_data['current_ratio'] = '< 1.00'
+                elif 1 <= value <= 1.99:
+                    mapped_data['current_ratio'] = '1.01 - 1.99'
+                elif value >= 2:
+                    mapped_data['current_ratio'] = '> 2.00'
+                else:
+                    mapped_data['current_ratio'] = 'N/A'
+                
+            elif key == 'gearing_ratio':
+                if value < 0:
+                    mapped_data['gearing_ratio'] = 'Negative'
+                elif 0 <= value <= 0.99:
+                    mapped_data['gearing_ratio'] = '( 0 - 0.99 )'
+                elif 1 <= value <= 1.99:
+                    mapped_data['gearing_ratio'] = '( 1.00 - 1.99 )'
+                elif 2 <= value <= 2.99:
+                    mapped_data['gearing_ratio'] = '( 2.00 - 2.99 )'
+                elif 3 <= value <= 3.99:
+                    mapped_data['gearing_ratio'] = '( 3.00 - 3.99 )'
+                elif value >= 4:
+                    mapped_data['gearing_ratio'] = '> 4.00'
+                else:
+                    mapped_data['gearing_ratio'] = 'N/A'
+            
+        return mapped_data
     
     def extract_using_image(self, table_tag: str):
         """Extract data from images of document pages where the specified table is located."""
@@ -1508,14 +1689,19 @@ class DocumentDataExtractor:
         except ValueError:
             return ""
     
-    def __calculate_years__(self, date_str: str) -> int:
-        """Calculates years since date string DD-MM-YYYY."""
+    def __calculate_years__(self, date_str: str) -> float:
+        """Calculates years (as a float) since date string DD-MM-YYYY."""
         try:
-            date = datetime.strptime(date_str, '%d-%m-%Y')
+            past_date = datetime.strptime(date_str, '%d-%m-%Y')
             today = datetime.today()
-            years_elapsed = today.year - date.year - ((today.month, today.day) < (date.month, date.day))
-            return years_elapsed
-        except ValueError:
+            
+            difference = today - past_date
+            
+            # 365.25 accounts for leap year cycles
+            years_elapsed = difference.days / 365.25
+            
+            return round(years_elapsed, 2)
+        except (ValueError, TypeError):
             return None
     
     def __str_to_decimal__(self, value: str) -> Decimal:
@@ -1554,7 +1740,6 @@ class DocumentDataExtractor:
         zeroes = 0
         ones = 0
         twos = 0
-        threes_to_fives = 0
         high_non_zeroes = 0
         digits = len(flat_list)
         for digit in flat_list:
@@ -1564,19 +1749,17 @@ class DocumentDataExtractor:
                 ones += 1
             elif digit == 2:
                 twos += 1
-            elif 3 <= digit <= 5:
-                threes_to_fives += 1
-            elif digit >= 6:
+            elif digit >= 3:
                 high_non_zeroes += 1
             else:
                 digits -= 1  # invalid
         non_zeroes = digits - zeroes
         if digits == zeroes or ((non_zeroes / digits) < 0.2 and non_zeroes == ones):
-            return 'Satisfactory'
+            return 'Satisfactory ( Prompt payment or occasionally lapsed 1 month )'
         elif (non_zeroes / digits) < 0.3 and non_zeroes == (ones + twos):
-            return 'Moderate'
+            return 'Moderate ( Consistently lapsed 1-2 months )'
         else:
-            return 'Poor'
+            return 'Unsatisfactory ( Under SPA or consistently lapsed 2 months and above )'
 
     def __parse_conduct_values__(self, conduct_values: List[str]) -> str:
         """Evaluate conduct of account based on conduct values extracted from CCRIS Details table."""
@@ -1587,7 +1770,6 @@ class DocumentDataExtractor:
         twos = 0
         # TODO check ranges for credit scoring form
         # This is assuming guarantor will never have >9 months lapses in payments...so must double check with gpt4o
-        threes_to_fives = 0
         high_non_zeroes = 0
         for string in conduct_values:
             for char in string:
@@ -1601,19 +1783,17 @@ class DocumentDataExtractor:
                         ones += 1
                     elif char == '2':
                         twos += 1
-                    elif char in ['3', '4', '5']:
-                        threes_to_fives += 1
-                    elif char in ['6', '7', '8', '9']:
+                    elif char in ['3', '4', '5', '6', '7', '8', '9']:
                         high_non_zeroes += 1
                     else:
                         non_zeroes -= 1
                         digits -= 1  # invalid character, do not count
         if digits == zeroes or ((non_zeroes / digits) < 0.2 and non_zeroes == ones):
-            return 'Satisfactory'
+            return 'Satisfactory ( Prompt payment or occasionally lapsed 1 month )'
         elif (non_zeroes / digits) < 0.3 and non_zeroes == (ones + twos):
-            return 'Moderate'
+            return 'Moderate ( Consistently lapsed 1-2 months )'
         else:
-            return 'Poor'
+            return 'Unsatisfactory ( Under SPA or consistently lapsed 2 months and above )'
 
     def __extract_conduct__(self, table, start_row_idx: int, end_row_idx: int) -> List[str]:
         """Extracts conduct information from CCRIS Details table."""
