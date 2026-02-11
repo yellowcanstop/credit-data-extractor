@@ -424,6 +424,14 @@ class DocumentDataExtractor:
             if self.__is_fuzzy_match__(header_text, 'credit info at a glance') or self.__is_fuzzy_match__(header_text, 'credit info') or self.__is_fuzzy_match__(header_text, 'winding up / bankruptcy proceedings record'):
                 return [{'idx': table_idx, 'type': 'CREDIT_INFO_AT_A_GLANCE'}]
             
+            # company: sdn bhd
+            if self.__is_fuzzy_match__(header_text, 'directors / officers') or (self.__is_fuzzy_match__(header_text, 'name') and table.column_count == 7):
+                return [{'idx': table_idx, 'type': 'DIRECTORS_OFFICERS'}]
+            
+            # company: partnership
+            if self.__is_fuzzy_match__(header_text, 'b1: business profile') or self.__is_fuzzy_match__(header_text, 'current business owner(s) / partner(s)') or self.__is_fuzzy_match__(header_text, 'note: the information above have been extracted from ROB computer printout search. We do not warrant as to its accuracy, correctness or completeness. If there are inconsistencies, inaccuracies or missing details or information, please conduct a further probe.'):
+                return [{'idx': table_idx, 'type': 'BUSINESS_PROFILE'}]
+            
             if (self.__is_fuzzy_match__(header_text, 'financial highlights') or self.__is_fuzzy_match__(header_text, 'financial year end') or self.__is_fuzzy_match__(header_text, 'date of tabling') or self.__is_fuzzy_match__(header_text, 'balance sheet') or self.__is_fuzzy_match__(header_text, 'non-current assets') or self.__is_fuzzy_match__(header_text, 'income statement') or self.__is_fuzzy_match__(header_text, 'revenue') or self.__is_fuzzy_match__(header_text, 'liquidity ratios') or self.__is_fuzzy_match__(header_text, 'current ratio')) and table.column_count == 6:
                 return [{'idx': table_idx, 'type': 'FINANCIAL_STATEMENTS'}]
 
@@ -458,6 +466,14 @@ class DocumentDataExtractor:
                 
                 if self.__is_fuzzy_match__(preceding_lower, 'credit info at a glance') or self.__is_fuzzy_match__(preceding_lower, 'credit info') or self.__is_fuzzy_match__(preceding_lower, 'winding up / bankruptcy proceedings record'):
                     return [{'idx': table_idx, 'type': 'CREDIT_INFO_AT_A_GLANCE'}]
+                
+                # company: sdn bhd
+                if self.__is_fuzzy_match__(preceding_lower, 'directors / officers') or (self.__is_fuzzy_match__(preceding_lower, 'name') and table.column_count == 7):
+                    return [{'idx': table_idx, 'type': 'DIRECTORS_OFFICERS'}]
+                
+                # company: partnership
+                if self.__is_fuzzy_match__(preceding_lower, 'b1: business profile') or self.__is_fuzzy_match__(preceding_lower, 'current business owner(s) / partner(s)') or self.__is_fuzzy_match__(preceding_lower, 'note: the information above have been extracted from ROB computer printout search. We do not warrant as to its accuracy, correctness or completeness. If there are inconsistencies, inaccuracies or missing details or information, please conduct a further probe.'):
+                    return [{'idx': table_idx, 'type': 'BUSINESS_PROFILE'}]
                 
                 if (self.__is_fuzzy_match__(preceding_lower, 'financial highlights') or self.__is_fuzzy_match__(preceding_lower, 'financial year end') or self.__is_fuzzy_match__(preceding_lower, 'date of tabling') or self.__is_fuzzy_match__(preceding_lower, 'balance sheet') or self.__is_fuzzy_match__(preceding_lower, 'non-current assets') or self.__is_fuzzy_match__(preceding_lower, 'income statement') or self.__is_fuzzy_match__(preceding_lower, 'revenue') or self.__is_fuzzy_match__(preceding_lower, 'liquidity ratios') or self.__is_fuzzy_match__(preceding_lower, 'current ratio')) and table.column_count == 6:
                     return [{'idx': table_idx, 'type': 'FINANCIAL_STATEMENTS'}]
@@ -792,8 +808,29 @@ class DocumentDataExtractor:
                         extracted_values['msic'] = " ".join(val.splitlines())
 
                 if self.__is_fuzzy_match__(row_key_text, 'business commenced') or self.__is_fuzzy_match__(row_key_text, 'last changed date') or self.__is_fuzzy_match__(row_key_text, 'rob search date') or self.__is_fuzzy_match__(row_key_text, 'current registration expiry date'):
-                    self.relevant_bools['partnership'] = True
+                    if self.relevant_bools.get('partnership') is None:
+                        self.relevant_bools['partnership'] = True
         
+        elif table_type == 'DIRECTORS_OFFICERS':
+            director_count = 0
+            for r_idx in table:
+                row_key_text = table[r_idx].get(4, "").strip().lower()
+                if self.__is_fuzzy_match__(row_key_text, 'ds'):
+                    director_count += 1
+            extracted_values['director_count'] = director_count
+        
+        elif table_type == 'BUSINESS_PROFILE':
+            if self.relevant_bools.get('partnership') is None:
+                self.relevant_bools['partnership'] = True
+            partner_count = 0
+            for r_idx in table:
+                row_key_text = table[r_idx].get(0, "").strip().lower()
+                if self.__is_fuzzy_match__(row_key_text, 'position'):
+                    val = self.__safe_get_cell__(table, r_idx, 1)
+                    if val is not None and self.__is_fuzzy_match__(val, 'partner'):
+                        partner_count += 1
+            extracted_values['partner_count'] = partner_count
+
         elif table_type == 'FINANCIALS_AND_SHAREHOLDERS':
             for r_idx in table:
                 row_key_text = table[r_idx].get(0, "").strip().lower()
@@ -1145,7 +1182,20 @@ class DocumentDataExtractor:
                 parsed_data['net_current_assets'] = 'N/A'
                 parsed_data['current_ratio'] = 'N/A'
                 parsed_data['gearing_ratio'] = 'N/A'
+                if extracted_data.get('partner_count') is not None:
+                    parsed_data['number_of_directors_or_partners'] = extracted_data['partner_count']
+                else:
+                    # partnership detected but number of partners not found
+                    # TODO markdown
+                    pass
             else:
+                if extracted_data.get('director_count') is not None:
+                    parsed_data['number_of_directors_or_partners'] = extracted_data['director_count']
+                else:
+                    # director count not found
+                    # TODO markdown
+                    pass
+
                 if extracted_data.get('paid_up_capital') is not None:
                     parsed_data['paid_up_capital'] = self.__to_decimal__(extracted_data['paid_up_capital'])
             
