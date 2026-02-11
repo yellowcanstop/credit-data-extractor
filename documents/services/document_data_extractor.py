@@ -46,7 +46,7 @@ class DocumentDataExtractorOptions:
         :param top_p: The nucleus sampling parameter for the model. Default is 0.1.
         """
 
-        self.system_prompt = f"""You are an AI assistant that extracts data from specified tables in documents."""
+        self.system_prompt = f"""You are an AI assistant that extracts data from specific tables in documents. You will be provided with the markdown content of the document which includes text and tables."""
         self.page_start = page_start
         self.page_end = page_end
         self.openai_endpoint = openai_endpoint
@@ -82,107 +82,6 @@ class DocumentDataExtractor:
             return None
         return value.strip()
 
-    '''
-    def from_bytes(self, document_bytes: bytes, response_format: type[ResponseFormatT], options: DocumentDataExtractorOptions) -> ExtractionConfidenceResult:
-        """Extracts structured data from the specified document bytes by converting the document to images and using an Azure OpenAI model to extract the data.
-
-        :param document_bytes: The byte array content of the document to extract data from.
-        :param options: The options for configuring the Azure OpenAI request for extracting data.
-        :return: The structured data extracted from the document as a dictionary.
-        """
-
-        client = self.__get_openai_client__(options)
-        di_client = self.__get_document_intelligence_client__(options)
-
-        if options.page_start and options.page_end:
-            page_range = f"{options.page_start}-{options.page_end}"
-        else:
-            page_range = None
-
-        # For a more accurate extraction, we can use the Document Intelligence service to extract the document layout and convert it to markdown.
-        if di_client:
-            poller = di_client.begin_analyze_document(
-                model_id="prebuilt-layout",
-                body=document_bytes,
-                pages=page_range,
-                output_content_format=DocumentContentFormat.MARKDOWN,
-                content_type="application/pdf"
-            )
-            self.result: AnalyzeResult = poller.result()
-            document_markdown = self.result.content
-        else:
-            document_markdown = None
-
-        image_uris = self.__get_document_image_uris__(
-            document_bytes, options.page_start, options.page_end)
-
-        user_content = []
-        user_content.append({
-            "type": "text",
-            "text": "placeholder"
-        })
-
-        if document_markdown:
-            user_content.append({
-                "type": "text",
-                "text": document_markdown
-            })
-
-        for image_uri in image_uris:
-            user_content.append({
-                "type": "image_url",
-                "image_url": {
-                    "url": image_uri
-                }
-            })
-
-        completion = client.beta.chat.completions.parse(
-            model=options.deployment_name,
-            messages=[
-                {
-                    "role": "system",
-                    "content": options.system_prompt,
-                },
-                {
-                    "role": "user",
-                    "content": user_content
-                }
-            ],
-            response_format=response_format,
-            max_tokens=options.max_tokens,
-            temperature=options.temperature,
-            top_p=options.top_p,
-            # Enabled to determine the confidence of the response.
-            logprobs=True
-        )
-
-        response_obj = completion.choices[0].message.parsed
-        response_obj_dict = response_obj.model_dump()
-
-        confidence_openai = evaluate_confidence_openai(
-            extract_result=response_obj_dict,
-            choice=completion.choices[0]
-        )
-
-        if di_client:
-            confidence_di = evaluate_confidence_di(
-                extract_result=response_obj_dict,
-                analyze_result=self.result
-            )
-            confidence = merge_confidence_values(
-                confidence_a=confidence_di,
-                confidence_b=confidence_openai
-            )
-        else:
-            confidence = confidence_openai
-
-        return ExtractionConfidenceResult(
-            data=response_obj,
-            confidence_scores=confidence,
-            overall_confidence=confidence[OVERALL_CONFIDENCE_KEY]
-        )
-    '''
-
     def extract_using_doc_intelligence(self, document_bytes: bytes, options: DocumentDataExtractorOptions): 
         logger.info("Starting extraction, document size: %d bytes", len(document_bytes))
         
@@ -212,6 +111,13 @@ class DocumentDataExtractor:
             self.result: AnalyzeResult = poller.result()
             logger.info("Document Intelligence returned %d tables, %d paragraphs", len(self.result.tables or []), len(self.result.paragraphs or []))
 
+            '''
+            confidence_di = evaluate_confidence_di(
+                extract_result=response_obj_dict,
+                analyze_result=self.result
+            )
+            '''
+
             self.report_type = self.__classify_report_type__()
             logger.info("Classified report type as: %s", self.report_type.value)
 
@@ -230,8 +136,6 @@ class DocumentDataExtractor:
         except Exception as e:
             logger.error("Extraction failed: %s", e, exc_info=True)
             raise
-
-        # TODO if openai is low confidence, escalate to human review
         
         # Convert Decimal values to float for JSON serialization
         return {k: float(v) if isinstance(v, Decimal) else v for k, v in mapped_data.items()}
@@ -939,9 +843,9 @@ class DocumentDataExtractor:
                
             if extracted_data.get('ccris_conduct') is not None and extracted_data.get('total_outstanding_balance_1') is None and extracted_data.get('total_limit_1') is None:
                 logger.info("CCRIS Detail edge case detected.")
-                details_image_data = self.extract_using_image('ccris_detail_edge_case')
+                details_image_data = self.extract_using_markdown_and_image('ccris_detail_edge_case')
             else:
-                details_image_data = self.extract_using_image('ccris_detail')
+                details_image_data = self.extract_using_markdown_and_image('ccris_detail')
 
             if details_image_data:
                 if details_image_data.get('ccris_conduct') is not None:
@@ -1004,7 +908,7 @@ class DocumentDataExtractor:
             # use ai as fallback. this needs to be async
             if parsed_data.get('utilisation') is None:
                 logger.info("Utilisation not found from table extraction, falling back to image extraction")
-                summary_image_data = self.extract_using_image('ccris_summary')
+                summary_image_data = self.extract_using_markdown_and_image('ccris_summary')
                 if summary_image_data:
                     if summary_image_data.get('total_outstanding_balance') is not None and summary_image_data.get('total_limit') is not None:
                         bal = self.__to_decimal__(summary_image_data['total_outstanding_balance'])
@@ -1018,7 +922,7 @@ class DocumentDataExtractor:
 
             if (parsed_data.get('special_attention_accounts') is None) or (parsed_data.get('legal_cases') is None):
                 logger.info("Special attention accounts or legal cases not found from table extraction, falling back to image extraction")
-                credit_image_data = self.extract_using_image('credit_info_at_a_glance')
+                credit_image_data = self.extract_using_markdown_and_image('credit_info_at_a_glance')
                 if credit_image_data:
                     if parsed_data.get('special_attention_accounts') is None and credit_image_data.get('special_attention_accounts') is not None:
                         parsed_data['special_attention_accounts'] = credit_image_data['special_attention_accounts']
@@ -1045,9 +949,9 @@ class DocumentDataExtractor:
                 parsed_data['utilisation'] = 'N/A'
             else:
                 if extracted_data.get('ccris_conduct') is not None and extracted_data.get('total_outstanding_balance_1') is None and extracted_data.get('total_limit_1') is None:
-                    details_image_data = self.extract_using_image('ccris_detail_edge_case')
+                    details_image_data = self.extract_using_markdown_and_image('ccris_detail_edge_case')
                 else:
-                    details_image_data = self.extract_using_image('ccris_detail')
+                    details_image_data = self.extract_using_markdown_and_image('ccris_detail')
 
                 if details_image_data:
                     if details_image_data.get('ccris_conduct') is not None:
@@ -1080,7 +984,7 @@ class DocumentDataExtractor:
 
                 if parsed_data.get('utilisation') is None:
                     logger.info("Utilisation not found from table extraction, falling back to image extraction")
-                    summary_image_data = self.extract_using_image('ccris_summary')
+                    summary_image_data = self.extract_using_markdown_and_image('ccris_summary')
                     if summary_image_data and summary_image_data.get('total_outstanding_balance') is not None and summary_image_data.get('total_limit') is not None:
                         bal = self.__to_decimal__(summary_image_data['total_outstanding_balance'])
                         limit = self.__to_decimal__(summary_image_data['total_limit'])
@@ -1119,7 +1023,7 @@ class DocumentDataExtractor:
 
             if (parsed_data.get('special_attention_accounts') is None) or (parsed_data.get('legal_cases') is None):
                 logger.info("Special attention accounts or legal cases not found from table extraction, falling back to image extraction")
-                credit_image_data = self.extract_using_image('credit_info_at_a_glance')
+                credit_image_data = self.extract_using_markdown_and_image('credit_info_at_a_glance')
                 if credit_image_data:
                     if parsed_data.get('special_attention_accounts') is None and credit_image_data.get('special_attention_accounts_entity') is not None:
                         parsed_data['special_attention_accounts'] = credit_image_data['special_attention_accounts_entity']
@@ -1156,7 +1060,7 @@ class DocumentDataExtractor:
             
             if parsed_data.get('years_in_business') is None or parsed_data.get('type_of_company') is None or parsed_data.get('nature_of_business') is None:
                 logger.info("Snapshot data incomplete from table extraction, falling back to image extraction")
-                snapshot_image_data = self.extract_using_image('snapshot')
+                snapshot_image_data = self.extract_using_markdown_and_image('snapshot')
                 if snapshot_image_data:
                     if parsed_data.get('years_in_business') is None and snapshot_image_data.get('registration_date') is not None:
                         parsed_data['years_in_business'] = self.__calculate_years__(snapshot_image_data['registration_date'])
@@ -1261,7 +1165,7 @@ class DocumentDataExtractor:
 
                 if parsed_data.get('paid_up_capital') is None:
                     logger.info("Paid up capital not found from table extraction, falling back to image extraction")
-                    shareholders_image_data = self.extract_using_image('financials_and_shareholders')
+                    shareholders_image_data = self.extract_using_markdown_and_image('financials_and_shareholders')
                     if shareholders_image_data and shareholders_image_data.get('paid_up_capital') is not None:
                         parsed_data['paid_up_capital'] = self.__to_decimal__(shareholders_image_data['paid_up_capital'])
                     else:
@@ -1269,7 +1173,7 @@ class DocumentDataExtractor:
 
                 if (parsed_data.get('financial_report_date') is None) or (parsed_data.get('turnover') is None) or (parsed_data.get('net_profit') is None) or (parsed_data.get('retained_profit') is None) or (parsed_data.get('net_worth') is None) or (parsed_data.get('net_current_assets') is None) or (parsed_data.get('current_ratio') is None) or (parsed_data.get('gearing_ratio') is None):
                     logger.info("Financial statements data incomplete from table extraction, falling back to image extraction")
-                    financials_image_data = self.extract_using_image('financial_statements')
+                    financials_image_data = self.extract_using_markdown_and_image('financial_statements')
                     logger.info("Financial statements data extracted from image: %s", json.dumps(financials_image_data, indent=2))
 
                     if financials_image_data:
@@ -1508,8 +1412,45 @@ class DocumentDataExtractor:
             
         return mapped_data
     
-    def extract_using_image(self, table_tag: str):
-        """Extract data from images of document pages where the specified table is located."""
+    def extract_using_markdown(self, prompt: str):
+        """Extract data from markdown generated from Azure Document Intelligence."""
+        markdown = self.result.content
+        if not markdown:
+            return
+        
+        client = self.__get_openai_client__(self.options)
+
+        user_content = [{"type": "text", "text": prompt}, {"type": "text", "text": markdown}]
+
+        completion = client.chat.completions.create(
+            model=self.options.deployment_name,
+            messages=[
+                {"role": "system", "content": self.options.system_prompt},
+                {"role": "user", "content": user_content}
+            ],
+            max_tokens=self.options.max_tokens,
+            temperature=self.options.temperature,
+            top_p=self.options.top_p,
+            logprobs=True,
+            response_format={"type": "json_object"}
+        )
+
+        raw_content = completion.choices[0].message.content
+        
+        try:
+            response_obj_dict = json.loads(raw_content)
+            return response_obj_dict
+        except json.JSONDecodeError:
+            # Fallback in case the model returns invalid JSON 
+            # (Rare with json_object mode, but good practice)
+            return {"error": "Failed to decode JSON", "raw": raw_content}
+
+    def extract_using_markdown_and_image(self, table_tag: str):
+        """Extract data from markdown content and images of document pages where the specified table is located."""
+        markdown = self.result.content
+        if not markdown:
+            return
+        
         client = self.__get_openai_client__(self.options)
 
         page_start, page_end = self.__get_page_range_for_table_tag__(table_tag)
@@ -1522,7 +1463,7 @@ class DocumentDataExtractor:
         
         table_prompt = self.__get_prompt_for_table_tag__(table_tag)
 
-        user_content = [{"type": "text", "text": table_prompt}]
+        user_content = [{"type": "text", "text": table_prompt}, {"type": "text", "text": markdown}]
 
         for image_uri in image_uris:
             user_content.append({
@@ -1533,7 +1474,6 @@ class DocumentDataExtractor:
                 }
             })
 
-        # 1. Change to .create() instead of .beta...parse()
         completion = client.chat.completions.create(
             model=self.options.deployment_name,
             messages=[
@@ -1544,11 +1484,9 @@ class DocumentDataExtractor:
             temperature=self.options.temperature,
             top_p=self.options.top_p,
             logprobs=True,
-            # 2. Set response_format to json_object
             response_format={"type": "json_object"}
         )
 
-        # 3. Access .content (a string) and parse it manually
         raw_content = completion.choices[0].message.content
         
         try:
@@ -1581,6 +1519,12 @@ class DocumentDataExtractor:
 
         response_obj = completion.choices[0].message.parsed
         response_obj_dict = response_obj.model_dump()
+
+        confidence_openai = evaluate_confidence_openai(
+            extract_result=response_obj_dict,
+            choice=completion.choices[0]
+        )
+
         return response_obj_dict
         '''
 
