@@ -306,7 +306,8 @@ class DocumentDataExtractor:
         }
 
         # Force additional validation of number of non-zeroes using image + markdown from GPT-4o.
-        fields_needing_fallback_l2.add('repayment_to_banks')
+        if self.di_conduct is not None and 'repayment_to_banks' not in fields_needing_fallback_l2:
+            fields_needing_fallback_l2.add('repayment_to_banks')
 
         if not fields_needing_fallback_l2:
             logger.info("All fields resolved at Layer 1")
@@ -2518,7 +2519,8 @@ class DocumentDataExtractor:
                     "From the liquidity ratios, extract 'current ratio'. "
                     "From the leverage ratios, extract 'gearing ratio' and 'debt to equity ratio [%]'. "
                     "The values are in two decimal places. Brackets surrounding a numerical value indicates that the numerical value is negative. "
-                    "Ignore asterisks around values if present. If the value is 0, it may be represented as a dash '-' or an en-dash '–' or an em-dash '—'. If the value is 0.00, return 0.00 and do not return null. Only return null if the field is not present in all the tables in all the images attached. "
+                    "Ignore asterisks around values if present. If the value is 0, it may be represented as a dash '-' or an en-dash '–' or an em-dash '—'. IMPORTANT: If a field's value is shown as a dash '-' or an en-dash '–' or an em-dash '—', this represents zero (0.00). You MUST return 0.00 for that field, NOT null. "
+                    "Only return null if the field name (row) itself is completely missing from all the tables in all the images attached. If the row exists but shows a dash, return 0.00. "
                     "Due to OCR errors, some commas may be represented as periods, and vice versa. Always treat the right-most separator as the decimal point if ambiguous. "
                     "If any of these fields are not present in the tables, return null for that field. "
                     "Return the extracted data in the following JSON format: "
