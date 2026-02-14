@@ -12,13 +12,13 @@ import io
 from typing import Dict, List, Tuple, TypeVar, Optional, Any
 from azure.ai.documentintelligence import DocumentIntelligenceClient
 from azure.ai.documentintelligence.models import AnalyzeResult, DocumentContentFormat, DocumentAnalysisFeature
-from shared.confidence.confidence_utils import merge_confidence_values
 from shared.confidence.openai_confidence import evaluate_confidence as evaluate_confidence_openai
 from shared.confidence.document_intelligence_confidence import SearchContext, evaluate_confidence as evaluate_confidence_di
-from shared.confidence.confidence_result import ConfidenceResult, OVERALL_CONFIDENCE_KEY
 import logging
 
 logger = logging.getLogger(__name__)
+
+LOW_CONFIDENCE_THRESHOLD = 0.8
 
 class ReportType(enum.Enum):
     INDIVIDUAL = "INDIVIDUAL"
@@ -28,7 +28,35 @@ ResponseFormatT = TypeVar(
     "ResponseFormatT"
 )
 
-ExtractionConfidenceResult = ConfidenceResult[ResponseFormatT | None]
+
+INDIVIDUAL_REQUIRED_FIELDS = [
+    'repayment_to_banks',
+    'utilisation',
+    'special_attention_accounts',
+    'legal_cases',
+    'blacklist',
+]
+
+COMPANY_REQUIRED_FIELDS = [
+    'repayment_to_banks',
+    'utilisation',
+    'special_attention_accounts',
+    'legal_cases',
+    'blacklist',
+    'years_in_business',
+    'type_of_company',
+    'nature_of_business',
+    'number_of_directors_or_partners',
+    'paid_up_capital',
+    'financial_report_date',
+    'turnover',
+    'net_profit',
+    'retained_profit',
+    'net_worth',
+    'net_current_assets',
+    'current_ratio',
+    'gearing_ratio',
+]
 
 class DocumentDataExtractorOptions:
     """Defines the configuration options for extracting data from a document using Azure OpenAI."""
@@ -128,10 +156,11 @@ class DocumentDataExtractor:
 
             logger.info("Document Intelligence confidence evaluation: %s", confidence_di)
 
-            parsed_data = self.__parse_extracted_data__(extracted_data)
+            parsed_data, flags = self.__run_extraction_pipeline__(extracted_data, confidence_di)
             logger.info("Parsed extracted data: %s", parsed_data)
 
             mapped_data = self.__map_parsed_data__(parsed_data)
+            mapped_data['_flags'] = flags
             logger.info("Completed extraction successfully")
 
         except Exception as e:
@@ -139,7 +168,13 @@ class DocumentDataExtractor:
             raise
         
         # Convert Decimal values to float for JSON serialization
-        return {k: float(v) if isinstance(v, Decimal) else v for k, v in mapped_data.items()}
+        result = {}
+        for k, v in mapped_data.items():
+            if isinstance(v, Decimal):
+                result[k] = float(v)
+            else:
+                result[k] = v
+        return result
     
     def __to_decimal__(self, value) -> Decimal:
         """Converts a value to Decimal. Skips string normalization if value is already numeric."""
@@ -187,6 +222,1286 @@ class DocumentDataExtractor:
             min_page = min(existing_min, min_page)
             max_page = max(existing_max, max_page)
         self.table_page_ranges[table_tag] = (min_page, max_page)
+
+    def __get_required_fields__(self) -> List[str]:
+        """Returns the list of required parsed-data keys for the current report type."""
+        if self.report_type == ReportType.INDIVIDUAL:
+            return list(INDIVIDUAL_REQUIRED_FIELDS)
+        else:
+            base = list(COMPANY_REQUIRED_FIELDS)
+            # Partnership reports don't need most financial fields
+            if self.relevant_values.get('partnership') is not None:
+                for key in ['paid_up_capital', 'financial_report_date', 'turnover', 'net_profit',
+                            'retained_profit', 'net_worth', 'net_current_assets', 'current_ratio', 'gearing_ratio']:
+                    if key in base:
+                        base.remove(key)
+            return base
+
+    def __run_extraction_pipeline__(self, extracted_data: Dict, confidence_di: Dict) -> Tuple[Dict, Dict]:
+        """
+        Orchestrates the three-layer extraction:
+          Layer 0: Azure Document Intelligence JSON table extraction, passed as extracted_data.
+          Layer 1: Markdown-only extraction for essential cross-checking with layer 0.
+          Layer 2: Selective fallback using Markdown + Image.
+
+        Returns (parsed_data, flags) where flags contains missing/low-confidence info.
+        """
+        flags: Dict[str, List[str]] = {
+            'missing': [],
+            'low_confidence': [],
+            'validation_failed': [],
+        }
+
+        # ---- Layer 0: Parse DI data and validate ----
+        logger.info("=== Layer 0: Document Intelligence table extraction ===")
+        parsed_data = self.__parse_extracted_data_layer0__(extracted_data)
+        validation_l0 = self.__validate_parsed_data__(parsed_data, extracted_data)
+        missing_l0, low_conf_l0 = self.__identify_issues__(parsed_data, confidence_di)
+
+        logger.info("Layer 0 missing fields: %s", missing_l0)
+        logger.info("Layer 0 low confidence fields: %s", low_conf_l0)
+        logger.info("Layer 0 validation failures: %s", list(validation_l0.keys()))
+
+        # ---- Layer 1: Markdown ----
+        logger.info("=== Layer 1: Markdown-only GPT-4o for cross-checking all fields ===")
+        markdown_prompt = self.__get_markdown_prompt__()
+        markdown_result, markdown_choice = self.extract_using_markdown_with_confidence(markdown_prompt)
+
+        confidence_l1 = {}
+        if markdown_result and markdown_choice:
+            confidence_l1 = evaluate_confidence_openai(
+                extract_result=markdown_result,
+                choice=markdown_choice
+            )
+            logger.info("Layer 1 OpenAI confidence: %s", confidence_l1)
+
+            # Compare markdown results with DI results for all fields.
+            # If the fields are the same, and are both above the confidence threshold,
+            # then we keep the DI value. Otherwise, mark for Layer 2 fallback.
+            fields_needing_fallback_l2 = self.__compare_markdown_results_with_di__(
+                markdown_result, parsed_data, extracted_data, confidence_di, confidence_l1
+            )
+        else:
+            logger.warning("Layer 1: Markdown extraction returned no result, falling back on DI issues")
+            # Without markdown cross-check, fall back to DI-only issue detection
+            fields_needing_fallback_l2 = set(missing_l0) | set(low_conf_l0) | set(validation_l0.keys())
+
+        # Re-validate after any Layer 1 adoptions
+        validation_l1 = self.__validate_parsed_data__(parsed_data, extracted_data)
+        missing_l1, low_conf_l1 = self.__identify_issues__(parsed_data, confidence_l1 if confidence_l1 else confidence_di)
+        logger.info("Post-Layer 1 missing fields: %s", missing_l1)
+        logger.info("Post-Layer 1 low confidence fields: %s", low_conf_l1)
+        logger.info("Post-Layer 1 validation failures: %s", list(validation_l1.keys()))
+
+        # Merge any newly discovered issues into fields needing fallback
+        fields_needing_fallback_l2 = fields_needing_fallback_l2 | set(missing_l1) | set(validation_l1.keys())
+
+        # Remove fields that are already N/A (intentionally absent, e.g. partnership financials)
+        fields_needing_fallback_l2 = {
+            f for f in fields_needing_fallback_l2
+            if parsed_data.get(f) != 'N/A'
+        }
+
+        if not fields_needing_fallback_l2:
+            logger.info("All fields resolved at Layer 1")
+            return parsed_data, flags
+
+        # ---- Layer 2: Markdown + Image fallback ----
+        logger.info("=== Layer 2: Markdown + Image fallback for fields: %s ===", fields_needing_fallback_l2)
+        self.__run_layer2_image_fallback__(extracted_data, parsed_data, fields_needing_fallback_l2, markdown_result)
+
+        # Final validation
+        validation_l2 = self.__validate_parsed_data__(parsed_data, extracted_data)
+        required_fields = self.__get_required_fields__()
+
+        # Build final flags
+        for field in required_fields:
+            if parsed_data.get(field) is None:
+                flags['missing'].append(field)
+            elif field in validation_l2:
+                flags['validation_failed'].append(field)
+
+        # Check final confidence from all layers
+        # We only flag low confidence for fields that are present but weren't caught by validation
+        all_confidence = {}
+        if confidence_di:
+            all_confidence.update(confidence_di)
+        if confidence_l1:
+            all_confidence.update(confidence_l1)
+
+        for field in required_fields:
+            if field in flags['missing'] or field in flags['validation_failed']:
+                continue
+            if parsed_data.get(field) is not None:
+                field_conf = self.__get_field_confidence__(field, all_confidence)
+                if field_conf is not None and field_conf < LOW_CONFIDENCE_THRESHOLD:
+                    flags['low_confidence'].append(field)
+
+        if flags['missing']:
+            logger.warning("FINAL - Missing fields: %s", flags['missing'])
+        if flags['low_confidence']:
+            logger.warning("FINAL - Low confidence fields: %s", flags['low_confidence'])
+        if flags['validation_failed']:
+            logger.warning("FINAL - Validation failed fields: %s", flags['validation_failed'])
+
+        return parsed_data, flags
+    
+    def __get_field_confidence__(self, field: str, confidence: Dict) -> Optional[float]:
+        """Extracts the confidence score for a field from a confidence dict, e.g. nested {'confidence': float, 'value': ...} or just {'confidence': float}."""
+        if field not in confidence:
+            return None
+        val = confidence[field]
+        if isinstance(val, dict) and 'confidence' in val:
+            return val['confidence']
+        if isinstance(val, (int, float)):
+            return val
+        return None
+    
+    def __identify_issues__(self, parsed_data: Dict, confidence: Dict) -> Tuple[List[str], List[str]]:
+        """Returns (missing_fields, low_confidence_fields) for current state."""
+        required = self.__get_required_fields__()
+        missing = []
+        low_conf = []
+
+        for field in required:
+            val = parsed_data.get(field)
+            if val is None:
+                missing.append(field)
+                continue
+            # Check if N/A (intentionally absent)
+            if val == 'N/A':
+                continue
+            # Check confidence
+            field_conf = self.__get_field_confidence__(field, confidence)
+            if field_conf is not None and field_conf < LOW_CONFIDENCE_THRESHOLD:
+                low_conf.append(field)
+
+        return missing, low_conf
+    
+    def __validate_parsed_data__(self, parsed_data: Dict, extracted_data: Dict) -> Dict[str, str]:
+        """
+        Performs validation checks on parsed data. Returns a dict of field_name -> failure_reason for fields that fail validation.
+        """
+        failures = {}
+
+        # --- Utilisation cross-check: total_outstanding_balance_0 == _1, total_limit_0 == _1 ---
+        util_keys_0 = ['total_outstanding_balance_0', 'total_outstanding_balance_1', 'total_limit_0', 'total_limit_1']
+        if all(extracted_data.get(k) is not None for k in util_keys_0):
+            if (self.__normalize_numeric_str__(extracted_data['total_outstanding_balance_0']) !=
+                    self.__normalize_numeric_str__(extracted_data['total_outstanding_balance_1'])):
+                failures['utilisation'] = 'total_outstanding_balance mismatch'
+            if (self.__normalize_numeric_str__(extracted_data['total_limit_0']) !=
+                    self.__normalize_numeric_str__(extracted_data['total_limit_1'])):
+                failures['utilisation'] = 'total_limit mismatch'
+
+        # --- Special attention accounts cross-check (individual) ---
+        if self.report_type == ReportType.INDIVIDUAL:
+            spa_keys = ['special_attention_accounts_0', 'special_attention_accounts_1']
+            if all(extracted_data.get(k) is not None for k in spa_keys):
+                str0 = extracted_data['special_attention_accounts_0']
+                str1 = extracted_data['special_attention_accounts_1']
+                if str0[0].upper() != str1[0].upper():
+                    failures['special_attention_accounts'] = 'SAA value mismatch'
+
+        # --- Legal cases sum check ---
+        if self.report_type == ReportType.INDIVIDUAL:
+            legal_keys = ['legal_non_personal', 'legal_personal']
+        else:
+            legal_keys = ['legal_non_personal_entity', 'legal_personal_entity']
+
+        if all(extracted_data.get(k) is not None for k in legal_keys):
+            try:
+                np_val = int(extracted_data[legal_keys[0]])
+                p_val = int(extracted_data[legal_keys[1]])
+                calc = np_val + p_val
+                if extracted_data.get('legal_cases_count') is not None:
+                    if calc != extracted_data['legal_cases_count']:
+                        failures['legal_cases'] = f'legal sum {calc} != legal_cases_count {extracted_data["legal_cases_count"]}'
+            except (ValueError, TypeError):
+                failures['legal_cases'] = 'Could not parse legal case counts'
+
+        # --- Financial statements validation (non-partnership company only) ---
+        if self.report_type == ReportType.COMPANY and self.relevant_values.get('partnership') is None:
+            # Revenue cross-check
+            if extracted_data.get('revenue_0') is not None and extracted_data.get('revenue_1') is not None:
+                if (self.__normalize_numeric_str__(extracted_data['revenue_0']) !=
+                        self.__normalize_numeric_str__(extracted_data['revenue_1'])):
+                    if not (self.__normalize_numeric_str__(extracted_data['revenue_0']) == '0' and
+                            self.__normalize_numeric_str__(extracted_data['revenue_1']) == '0'):
+                        failures['turnover'] = 'revenue mismatch between financials_and_shareholders and financial_statements'
+
+            # Profit after tax cross-check
+            if extracted_data.get('profit_after_tax_0') is not None and extracted_data.get('profit_after_tax_1') is not None:
+                if (self.__normalize_numeric_str__(extracted_data['profit_after_tax_0']) !=
+                        self.__normalize_numeric_str__(extracted_data['profit_after_tax_1'])):
+                    if not (self.__normalize_numeric_str__(extracted_data['profit_after_tax_0']) == '0' and
+                            self.__normalize_numeric_str__(extracted_data['profit_after_tax_1']) == '0'):
+                        failures['net_profit'] = 'profit_after_tax mismatch between financials_and_shareholders and financial_statements'
+
+            # Balance sheet sum check: TA == NCA + CA, TL == NCL + CL + LTL
+            fs_keys = ['current_assets', 'current_liabilities', 'non_current_assets', 'total_assets',
+                       'non_current_liabilities', 'long_term_liabilities', 'total_liabilities']
+            if all(extracted_data.get(k) is not None for k in fs_keys):
+                nca = self.__to_decimal__(extracted_data['non_current_assets'])
+                ca = self.__to_decimal__(extracted_data['current_assets'])
+                ta = self.__to_decimal__(extracted_data['total_assets'])
+                ncl = self.__to_decimal__(extracted_data['non_current_liabilities'])
+                cl = self.__to_decimal__(extracted_data['current_liabilities'])
+                ltl = self.__to_decimal__(extracted_data['long_term_liabilities'])
+                tl = self.__to_decimal__(extracted_data['total_liabilities'])
+                if ta != nca + ca:
+                    failures['net_current_assets'] = f'total_assets {ta} != non_current_assets {nca} + current_assets {ca}'
+                if tl != ncl + cl + ltl:
+                    failures['net_current_assets'] = f'total_liabilities {tl} != sum of components'
+
+            # Current ratio validation
+            if extracted_data.get('current_ratio') is not None and extracted_data.get('current_assets') is not None and extracted_data.get('current_liabilities') is not None:
+                ca = self.__to_decimal__(extracted_data['current_assets'])
+                cl = self.__to_decimal__(extracted_data['current_liabilities'])
+                extracted_cr = self.__to_decimal__(extracted_data['current_ratio'])
+                if cl > 0:
+                    cr = ca / cl
+                    if abs(cr - extracted_cr) >= Decimal('0.01'):
+                        failures['current_ratio'] = f'current_ratio {extracted_cr} != calculated {cr}'
+
+            # Gearing ratio validation
+            if all(extracted_data.get(k) is not None for k in ['gearing_ratio', 'debt_to_equity_ratio', 'net_worth', 'total_liabilities']):
+                tl = self.__to_decimal__(extracted_data['total_liabilities'])
+                nw = self.__to_decimal__(extracted_data['net_worth'])
+                extracted_gr = self.__to_decimal__(extracted_data['gearing_ratio'])
+                extracted_der = self.__to_decimal__(extracted_data['debt_to_equity_ratio'])
+                if nw > 0:
+                    calc_gr = tl / nw
+                    if abs(extracted_gr - extracted_der) >= Decimal('0.01'):
+                        failures['gearing_ratio'] = 'gearing_ratio and debt_to_equity_ratio mismatch'
+                    elif abs(extracted_gr - calc_gr) >= Decimal('0.01'):
+                        failures['gearing_ratio'] = f'gearing_ratio {extracted_gr} != calculated {calc_gr}'
+
+        return failures
+    
+    def __parse_extracted_data_layer0__(self, extracted_data: Dict) -> Dict:
+        """Layer 0: Parse Document Intelligence-extracted table data into parsed fields.
+        """
+        parsed_data = {}
+
+        if self.report_type == ReportType.INDIVIDUAL:
+            # CCRIS conduct from DI
+            if extracted_data.get('ccris_conduct'):
+                parsed_data['repayment_to_banks'] = self.__parse_conduct_values__(extracted_data['ccris_conduct'])
+
+            # Utilisation
+            util_keys = ['total_outstanding_balance_0', 'total_outstanding_balance_1', 'total_limit_0', 'total_limit_1']
+            if all(extracted_data.get(key) is not None for key in util_keys):
+                if (self.__normalize_numeric_str__(extracted_data['total_outstanding_balance_0']) ==
+                        self.__normalize_numeric_str__(extracted_data['total_outstanding_balance_1']) and
+                        self.__normalize_numeric_str__(extracted_data['total_limit_0']) ==
+                        self.__normalize_numeric_str__(extracted_data['total_limit_1'])):
+                    bal = self.__to_decimal__(extracted_data['total_outstanding_balance_0'])
+                    limit = self.__to_decimal__(extracted_data['total_limit_0'])
+                    if limit > 0:
+                        parsed_data['utilisation'] = bal / limit * 100
+
+            # Special attention accounts
+            spa_keys = ['special_attention_accounts_0', 'special_attention_accounts_1']
+            if all(extracted_data.get(key) is not None for key in spa_keys):
+                # saa_0 is 'NO', saa_1 is 'N'
+                str0 = extracted_data['special_attention_accounts_0']
+                str1 = extracted_data['special_attention_accounts_1']
+                if str0[0] == str1[0]:
+                    parsed_data['special_attention_accounts'] = str0
+
+            # Legal cases
+            legal_keys = ['legal_non_personal', 'legal_personal']
+            if all(extracted_data.get(key) is not None for key in legal_keys):
+                if extracted_data['legal_non_personal'] == '0' and extracted_data['legal_personal'] == '0' and self.relevant_values.get('legal_cases') is None:
+                    parsed_data['legal_cases'] = 0
+                else:
+                    try:
+                        np_val = int(extracted_data['legal_non_personal'])
+                        p_val = int(extracted_data['legal_personal'])
+                        calc = np_val + p_val
+                        if extracted_data.get('legal_cases_count') is not None:
+                            if calc == extracted_data['legal_cases_count']:
+                                parsed_data['legal_cases'] = calc
+                    except (ValueError, TypeError):
+                        pass
+
+            # Blacklist (trade reference)
+            if self.relevant_values.get('trade_reference') is not None:
+                if extracted_data.get('trade_reference_count') is not None:
+                    parsed_data['blacklist'] = extracted_data['trade_reference_count']
+            elif self.relevant_values.get('trade_reference') is None:
+                parsed_data['blacklist'] = 0
+
+        elif self.report_type == ReportType.COMPANY:
+            # N/A when no CCRIS data at all
+            util_keys = ['total_outstanding_balance_0', 'total_outstanding_balance_1', 'total_limit_0', 'total_limit_1']
+            if all(extracted_data.get(key) is None for key in util_keys) and extracted_data.get('ccris_conduct') is None:
+                parsed_data['repayment_to_banks'] = 'N/A'
+                parsed_data['utilisation'] = 'N/A'
+            else:
+                # CCRIS conduct from DI
+                if extracted_data.get('ccris_conduct'):
+                    parsed_data['repayment_to_banks'] = self.__parse_conduct_values__(extracted_data['ccris_conduct'])
+
+                # Utilisation
+                if all(extracted_data.get(key) is not None for key in util_keys):
+                    if (self.__normalize_numeric_str__(extracted_data['total_outstanding_balance_0']) ==
+                            self.__normalize_numeric_str__(extracted_data['total_outstanding_balance_1']) and
+                            self.__normalize_numeric_str__(extracted_data['total_limit_0']) ==
+                            self.__normalize_numeric_str__(extracted_data['total_limit_1'])):
+                        bal = self.__to_decimal__(extracted_data['total_outstanding_balance_0'])
+                        limit = self.__to_decimal__(extracted_data['total_limit_0'])
+                        if limit > 0:
+                            parsed_data['utilisation'] = bal / limit * 100
+
+            # Special attention accounts (company uses entity)
+            if extracted_data.get('special_attention_accounts_entity') is not None:
+                parsed_data['special_attention_accounts'] = extracted_data['special_attention_accounts_entity']
+
+            # Legal cases
+            legal_keys = ['legal_non_personal_entity', 'legal_personal_entity']
+            if all(extracted_data.get(key) is not None for key in legal_keys):
+                if extracted_data['legal_non_personal_entity'] == '0' and extracted_data['legal_personal_entity'] == '0' and self.relevant_values.get('legal_cases') is None:
+                    parsed_data['legal_cases'] = 0
+                else:
+                    try:
+                        np_val = int(extracted_data['legal_non_personal_entity'])
+                        p_val = int(extracted_data['legal_personal_entity'])
+                        calc = np_val + p_val
+                        if extracted_data.get('legal_cases_count') is not None:
+                            if calc == extracted_data['legal_cases_count']:
+                                parsed_data['legal_cases'] = calc
+                    except (ValueError, TypeError):
+                        pass
+
+            # Blacklist (trade reference)
+            if self.relevant_values.get('trade_reference') is not None:
+                if extracted_data.get('trade_reference_count') is not None:
+                    parsed_data['blacklist'] = extracted_data['trade_reference_count']
+            if self.relevant_values.get('trade_reference') is None:
+                parsed_data['blacklist'] = 0
+
+            # Snapshot
+            if extracted_data.get('registration_date') is not None:
+                parsed_data['years_in_business'] = self.__calculate_years__(extracted_data['registration_date'])
+            if extracted_data.get('type') is not None:
+                type_val = extracted_data['type']
+                if self.__is_fuzzy_match__(type_val, 'limited by shares private limited'):
+                    parsed_data['type_of_company'] = 'Sdn Bhd'
+                else:
+                    parsed_data['type_of_company'] = 'Non - Sdn Bhd'
+            if extracted_data.get('msic') is not None:
+                parsed_data['nature_of_business'] = extracted_data['msic']
+
+            # Partnership handling
+            if self.relevant_values.get('partnership') is not None and parsed_data.get('type_of_company') == 'Non - Sdn Bhd':
+                # partnership form does not need paid_up_capital
+                #parsed_data['paid_up_capital'] = 'N/A'
+                parsed_data['financial_report_date'] = 'N/A'
+                parsed_data['turnover'] = 'N/A'
+                parsed_data['net_profit'] = 'N/A'
+                parsed_data['retained_profit'] = 'N/A'
+                parsed_data['net_worth'] = 'N/A'
+                parsed_data['net_current_assets'] = 'N/A'
+                parsed_data['current_ratio'] = 'N/A'
+                parsed_data['gearing_ratio'] = 'N/A'
+                if extracted_data.get('partner_count') is not None:
+                    parsed_data['number_of_directors_or_partners'] = extracted_data['partner_count']
+            else:
+                if extracted_data.get('director_count') is not None:
+                    parsed_data['number_of_directors_or_partners'] = extracted_data['director_count']
+                if extracted_data.get('paid_up_capital') is not None:
+                    parsed_data['paid_up_capital'] = self.__to_decimal__(extracted_data['paid_up_capital'])
+                if extracted_data.get('financial_year_end') is not None:
+                    parsed_data['financial_report_date'] = self.__reformat_date__(extracted_data['financial_year_end'])
+
+                # Revenue cross-check
+                if extracted_data.get('revenue_0') is not None and extracted_data.get('revenue_1') is not None:
+                    if (self.__normalize_numeric_str__(extracted_data['revenue_0']) ==
+                            self.__normalize_numeric_str__(extracted_data['revenue_1'])):
+                        parsed_data['turnover'] = self.__to_decimal__(extracted_data['revenue_0'])
+                    elif (self.__normalize_numeric_str__(extracted_data['revenue_0']) == '0' and
+                          self.__normalize_numeric_str__(extracted_data['revenue_1']) == '0'):
+                        parsed_data['turnover'] = Decimal(0)
+
+                # Profit after tax cross-check
+                if extracted_data.get('profit_after_tax_0') is not None and extracted_data.get('profit_after_tax_1') is not None:
+                    if (self.__normalize_numeric_str__(extracted_data['profit_after_tax_0']) ==
+                            self.__normalize_numeric_str__(extracted_data['profit_after_tax_1'])):
+                        parsed_data['net_profit'] = self.__to_decimal__(extracted_data['profit_after_tax_0'])
+                    elif (self.__normalize_numeric_str__(extracted_data['profit_after_tax_0']) == '0' and
+                          self.__normalize_numeric_str__(extracted_data['profit_after_tax_1']) == '0'):
+                        parsed_data['net_profit'] = Decimal(0)
+
+                if extracted_data.get('retained_earning') is not None:
+                    parsed_data['retained_profit'] = self.__to_decimal__(extracted_data['retained_earning'])
+                if extracted_data.get('net_worth') is not None:
+                    parsed_data['net_worth'] = self.__to_decimal__(extracted_data['net_worth'])
+
+                # Net current assets
+                fs_keys = ['current_assets', 'current_liabilities', 'non_current_assets', 'total_assets',
+                           'non_current_liabilities', 'long_term_liabilities', 'total_liabilities']
+                if all(extracted_data.get(key) is not None for key in fs_keys):
+                    nca = self.__to_decimal__(extracted_data['non_current_assets'])
+                    ca = self.__to_decimal__(extracted_data['current_assets'])
+                    ta = self.__to_decimal__(extracted_data['total_assets'])
+                    ncl = self.__to_decimal__(extracted_data['non_current_liabilities'])
+                    cl = self.__to_decimal__(extracted_data['current_liabilities'])
+                    ltl = self.__to_decimal__(extracted_data['long_term_liabilities'])
+                    tl = self.__to_decimal__(extracted_data['total_liabilities'])
+                    valid_ca_cl = (ta == nca + ca) and (tl == ncl + cl + ltl)
+                    if valid_ca_cl:
+                        parsed_data['net_current_assets'] = ca - cl
+                        if extracted_data.get('current_ratio') is not None:
+                            extracted_cr = self.__to_decimal__(extracted_data['current_ratio'])
+                            cr = ca / cl if cl > 0 else Decimal(0)
+                            if abs(cr - extracted_cr) < Decimal('0.01'):
+                                parsed_data['current_ratio'] = extracted_cr
+
+                # Gearing ratio
+                bal_keys = ['gearing_ratio', 'debt_to_equity_ratio', 'net_worth', 'total_liabilities']
+                if all(extracted_data.get(key) is not None for key in bal_keys):
+                    tl = self.__to_decimal__(extracted_data['total_liabilities'])
+                    nw = self.__to_decimal__(extracted_data['net_worth'])
+                    calculated_gr = tl / nw if nw > 0 else Decimal(0)
+                    extracted_gr = self.__to_decimal__(extracted_data['gearing_ratio'])
+                    extracted_der = self.__to_decimal__(extracted_data['debt_to_equity_ratio'])
+                    valid_gr = (abs(extracted_gr - extracted_der) < Decimal('0.01')) and (abs(extracted_gr - calculated_gr) < Decimal('0.01'))
+                    if valid_gr:
+                        parsed_data['gearing_ratio'] = extracted_gr
+
+        return parsed_data
+    
+    def __get_markdown_prompt__(self) -> str:
+        """Markdown prompt asking GPT-4o to:
+        - extract all fields (depending on report type) so that each field can be compared against the fields extracted from document intelligence table
+        - verify that for the sections 'd1: legal cases (subject as defendant)' and 'd2: legal cases (subject as plaintiff)', there is either 'no information available' below these section headings, or there are tables associated with these sections. If there are tables, count the number of legal cases in the summary table (to be compared against the legal cases count extracted from document intelligence).
+        - verify that for the section 'e2: trade reference', there is either 'no information available' below this section heading, or there are tables associated with this section with the subheadings 'the following information are in relation to account no' or 'aging information'. If there are tables, count the number of trade references in the summary table (to be compared against the trade reference count extracted from document intelligence).
+        """
+        common_instructions = (
+            "You are given the markdown content of a credit report document. "
+            "Extract the following fields from the document. "
+            "If the value is 0, it may be represented as a dash '-' or an en-dash '–' or an em-dash '—'. "
+            "If the value is 0.00, return 0.00 not null. "
+            "Brackets surrounding a numerical value indicates that the numerical value is negative. "
+            "If any field is not present in the document, return null for that field. "
+        )
+
+        # Legal cases verification instructions (common to both report types)
+        legal_instructions = (
+            "For the sections 'D1: LEGAL CASES (SUBJECT AS DEFENDANT)' and 'D2: LEGAL CASES (SUBJECT AS PLAINTIFF)', "
+            "check if there is 'No Information Available' below each section heading. "
+            "If 'No Information Available' appears, the legal case count for that section is 0. "
+            "If there are tables under these sections, count the total number of distinct legal case rows in the summary tables. "
+            "Return the total count of legal cases across both sections as 'legal_cases_count'. "
+        )
+
+        # Trade reference verification instructions (common to both report types)
+        trade_ref_instructions = (
+            "For the section 'E2: TRADE REFERENCE', "
+            "check if there is 'No Information Available' below the section heading. "
+            "If 'No Information Available' appears, return false for 'has_trade_reference'. "
+            "If there are tables under this section with subheadings like 'The following information are in relation to Account No' "
+            "or 'Aging Information', return true for 'has_trade_reference' and count the number of distinct trade reference entries "
+            "in the summary table as 'trade_reference_count'. "
+        )
+
+        if self.report_type == ReportType.INDIVIDUAL:
+            return (
+                common_instructions +
+                "From the table 'Credit Info at a Glance', extract: "
+                "- 'legal_personal': the number of legal records in past 24 months (personal capacity), from the 'Value' column. "
+                "- 'legal_non_personal': the number of legal records in past 24 months (non-personal capacity), from the 'Value' column. "
+                "- 'special_attention_accounts': the value for 'Special Attention Accounts', from the 'Value' column. "
+                "From the section 'C1: BANKING PAYMENT RECORDS (SOURCE: CCRIS, BANK NEGARA MALAYSIA)', "
+                "under 'Summary of Potential & Current Liabilities', for the row labeled 'As Borrower': "
+                "- 'total_outstanding_balance': the value under the 'Outstanding' column. "
+                "- 'total_limit': the value under the 'Total Limit' column. "
+                "- 'special_attention_accounts_0': the value ('Y' or 'N') for 'Special Attention Account' from the CCRIS summary. "
+                "- 'special_attention_accounts_1': the value ('Y' or 'N') for 'Special Attention Account' from the CCRIS summary. "
+                "From the 'CCRIS Details' table under 'loan information', extract: "
+                "'ccris_conduct': For each loan row, extract the values (the numeric digits in the monthly columns under the column 'Conduct of Account For Last 12 Months'). There may be multiple loan rows. For each loan row, collect the values into a list of integers. For example, if there are two rows, with the first loan row having all 12 subcolumns populated with the digits shown and the second loan row having only 11 subcolumns populated with the digits shown, then the final ccris_conduct is [[0,0,1,0,0,0,0,0,2,0,0,0], [0,0,1,0,0,0,0,0,2,0,0,0]]. Therefore, if you see a missing month, skip it. Do not represent a missing month with a 0. If you are unsure of the individual digits extracted, then return null for ccris_conduct. Ensure that all loan rows are extracted, with reference to the markdown table. The markdown table may span multiple pages, with each table in between separated by boilerplate text which includes the disclaimer and the slogan 'Knowledge creates confidence'."
+                + legal_instructions +
+                trade_ref_instructions +
+                "Return the extracted data in the following JSON format: "
+                "{\"total_outstanding_balance\": value or null, "
+                "\"total_limit\": value or null, "
+                "\"special_attention_accounts_0\": value or null, "
+                "\"special_attention_accounts_1\": value or null, "
+                "\"legal_non_personal\": value or null, "
+                "\"legal_personal\": value or null, "
+                "\"legal_cases_count\": value or null, "
+                "\"has_trade_reference\": true or false, "
+                "\"trade_reference_count\": value or null, "
+                "\"ccris_conduct\": [list of conduct strings] or null}."
+            )
+        elif self.report_type == ReportType.COMPANY:
+            shareholders_fields = ""
+            financial_fields = ""
+            directors_fields = ""
+            partners_fields = ""
+            if self.relevant_values.get('partnership') is None:
+                shareholders_fields = (
+                    "From the table 'Financials and Shareholders', extract: "
+                    "- 'paid_up_capital': the value for 'Paid-Up Capital (RM)'. "
+                )
+                financial_fields = (
+                    "From the 'Financial Highlights' / financial statements tables, extract for the latest financial year (second column): "
+                    "- 'financial_year_end': the financial year end date in YYYY-MM-DD format. "
+                    "- 'current_assets': the current assets value. "
+                    "- 'current_liabilities': the current liabilities value. "
+                    "- 'non_current_assets': the non-current assets value. "
+                    "- 'total_assets': the total assets value. "
+                    "- 'non_current_liabilities': the non-current liabilities value. "
+                    "- 'long_term_liabilities': the long-term liabilities value. "
+                    "- 'total_liabilities': the total liabilities value. "
+                    "- 'retained_earning': the retained earning value. "
+                    "- 'net_worth': the net worth (TA - TL) value. "
+                    "- 'revenue': the revenue value. "
+                    "- 'profit_after_tax': the profit / (loss) after tax value. "
+                    "- 'current_ratio': the current ratio value. "
+                    "- 'gearing_ratio': the gearing ratio value. "
+                    "- 'debt_to_equity_ratio': the debt to equity ratio value. "
+                )
+                directors_fields = (
+                    "From the table 'DIRECTORS / OFFICERS', extract 'director_count': the number of directors indicated by the designation 'DS'. Note that if the designation is 'SC', this indicates a company secretary and should not be counted towards the director count. "
+                )
+            else:
+                partners_fields = (
+                    "From the table 'B1: BUSINESS PROFILE' and 'CURRENT BUSINESS OWNER(S)/PARTNER(S)', extract 'partner_count': the number of partners indicated by the position 'Partner'."
+                )
+
+            return (
+                common_instructions +
+                "From the table 'A: SNAPSHOT', extract: "
+                "- 'registration_date': the registration date. "
+                "- 'type': the value for 'Type' or 'Type of Company'. "
+                "- 'msic': the MSIC value. "
+                "- 'is_partnership': true if you see fields like 'Business Commenced', 'Last Changed Date', "
+                "'ROB Search Date', or 'Current Registration Expiry Date' in the Snapshot table, otherwise false. "
+                + shareholders_fields +
+                "From the table 'Credit Info at a Glance', extract the Entity column values: "
+                 "- 'legal_personal_entity': the entity's number of legal records in past 24 months (personal capacity). "
+                "- 'legal_non_personal_entity': the entity's number of legal records in past 24 months (non-personal capacity). "
+                "- 'special_attention_accounts_entity': the entity's value for 'Special Attention Accounts'. "
+                + partners_fields 
+                + directors_fields
+                + financial_fields +
+                "From the section 'C1: BANKING PAYMENT RECORDS (SOURCE: CCRIS, BANK NEGARA MALAYSIA)', "
+                "under 'Summary of Potential & Current Liabilities', for the row labeled 'As Borrower': "
+                "- 'total_outstanding_balance': the value under the 'Outstanding' column. "
+                "- 'total_limit': the value under the 'Total Limit' column. "
+                "If sections C1: BANKING PAYMENT RECORDS and CCRIS DETAILS are entirely absent or show 'No Information Available', return null for those fields. "
+                "From the 'CCRIS Details' table under 'loan information', extract: "
+                "'ccris_conduct': For each loan row, extract the values (the numeric digits in the monthly columns under the column 'Conduct of Account For Last 12 Months'). There may be multiple loan rows. For each loan row, collect the values into a list of integers. For example, if there are two rows, with the first loan row having all 12 subcolumns populated with the digits shown and the second loan row having only 11 subcolumns populated with the digits shown, then the final ccris_conduct is [[0,0,1,0,0,0,0,0,2,0,0,0], [0,0,1,0,0,0,0,0,2,0,0,0]]. Therefore, if you see a missing month, skip it. Do not represent a missing month with a 0. If you are unsure of the individual digits extracted, then return null for ccris_conduct. Ensure that all loan rows are extracted, with reference to the markdown table. The markdown table may span multiple pages, with each table in between separated by boilerplate text which includes the disclaimer and the slogan 'Knowledge creates confidence'."
+                + legal_instructions +
+                trade_ref_instructions +
+                "Return the extracted data in the following JSON format: "
+                "{\"registration_date\": value or null, "
+                "\"type\": value or null, "
+                "\"msic\": value or null, "
+                "\"is_partnership\": true or false, "
+                "\"total_outstanding_balance\": value or null, "
+                "\"total_limit\": value or null, "
+                "\"special_attention_accounts_entity\": value or null, "
+                "\"legal_non_personal_entity\": value or null, "
+                "\"legal_personal_entity\": value or null, "
+                "\"legal_cases_count\": value or null, "
+                "\"has_trade_reference\": true or false, "
+                "\"trade_reference_count\": value or null, "
+                "\"ccris_conduct\": [list of conduct strings] or null"
+                + (", \"paid_up_capital\": value or null"
+                ", \"financial_year_end\": value or null"
+                ", \"revenue\": value or null"
+                ", \"profit_after_tax\": value or null"
+                ", \"current_assets\": value or null"
+                ", \"current_liabilities\": value or null"
+                ", \"non_current_assets\": value or null"
+                ", \"total_assets\": value or null"
+                ", \"non_current_liabilities\": value or null"
+                ", \"long_term_liabilities\": value or null"
+                ", \"total_liabilities\": value or null"
+                ", \"retained_earning\": value or null"
+                ", \"net_worth\": value or null"
+                ", \"current_ratio\": value or null"
+                ", \"gearing_ratio\": value or null"
+                ", \"debt_to_equity_ratio\": value or null"
+                ", \"director_count\": value or null"
+                if self.relevant_values.get('partnership') is None else ", \"partner_count\": value or null") +
+                "}."
+            )
+
+    def __compare_markdown_results_with_di__(self, markdown_result: Dict, parsed_data: Dict,
+                                          extracted_data: Dict, confidence_di: Dict,
+                                          confidence_l1: Dict) -> set:
+        """Compare markdown results with results from document intelligence layer 0.
+        
+        For each field:
+        - If DI and markdown agree, and both have confidence >= threshold, and validation passes: keep DI value.
+        - If they disagree, or either has low confidence, or validation fails: mark field for Layer 2 fallback.
+        - If DI is missing but markdown has a value with high confidence: adopt the markdown value.
+        
+        Returns the set of fields that still need Layer 2 fallback.
+        """
+        fields_needing_fallback = set()
+        required_fields = self.__get_required_fields__()
+
+        # Build a mapping from parsed_data field names to the raw extracted_data / markdown_result keys
+        # so we can compare like-for-like values
+        if self.report_type == ReportType.INDIVIDUAL:
+            field_to_md_keys = {
+                'utilisation': ['total_outstanding_balance', 'total_limit'],
+                'repayment_to_banks': ['ccris_conduct'],
+                'special_attention_accounts': ['special_attention_accounts_0', 'special_attention_accounts_1'],
+                'legal_cases': ['legal_non_personal', 'legal_personal', 'legal_cases_count'],
+                'blacklist': ['has_trade_reference', 'trade_reference_count'],
+            }
+        else:
+            field_to_md_keys = {
+                'utilisation': ['total_outstanding_balance', 'total_limit'],
+                'repayment_to_banks': ['ccris_conduct'],
+                'special_attention_accounts': ['special_attention_accounts_entity'],
+                'legal_cases': ['legal_non_personal_entity', 'legal_personal_entity', 'legal_cases_count'],
+                'blacklist': ['has_trade_reference', 'trade_reference_count'],
+                'years_in_business': ['registration_date'],
+                'type_of_company': ['type'],
+                'nature_of_business': ['msic'],
+                'number_of_directors_or_partners': ['partner_count', 'director_count'],
+                'paid_up_capital': ['paid_up_capital'],
+                'financial_report_date': ['financial_year_end'],
+                'turnover': ['revenue'],
+                'net_profit': ['profit_after_tax'],
+                'retained_profit': ['retained_earning'], 
+                'net_worth': ['net_worth'], 
+                'net_current_assets': ['current_assets', 'current_liabilities'],
+                'current_ratio': ['current_ratio'],
+                'gearing_ratio': ['gearing_ratio', 'debt_to_equity_ratio'],
+            }
+
+        for field in required_fields:
+            di_value = parsed_data.get(field)
+
+            # Skip fields already marked as N/A (intentionally absent)
+            if di_value == 'N/A':
+                continue
+
+            # Check DI confidence for this field
+            di_conf = self.__get_field_confidence__(field, confidence_di)
+            di_high_conf = di_conf is None or di_conf >= LOW_CONFIDENCE_THRESHOLD
+
+            # Check markdown confidence for the corresponding keys
+            md_keys = field_to_md_keys.get(field, [])
+            md_values_available = md_keys and all(
+                markdown_result.get(k) is not None for k in md_keys
+            ) if markdown_result else False
+
+            md_high_conf = True
+            if md_values_available and confidence_l1:
+                for k in md_keys:
+                    k_conf = self.__get_field_confidence__(k, confidence_l1)
+                    if k_conf is not None and k_conf < LOW_CONFIDENCE_THRESHOLD:
+                        md_high_conf = False
+                        break
+
+            # --- Compare values ---
+            if di_value is not None and md_values_available:
+                # Attempt to compare the specific sub-fields
+                values_agree = self.__compare_field_values__(field, di_value, markdown_result, extracted_data)
+
+                if values_agree and di_high_conf and md_high_conf:
+                    # Both agree with high confidence — keep DI value
+                    logger.info("Layer 1: Field '%s' — DI and markdown agree with high confidence, keeping DI value", field)
+                    continue
+                else:
+                    logger.warning("Layer 1: Field '%s' — DI/markdown disagree or low confidence, marking for Layer 2", field)
+                    fields_needing_fallback.add(field)
+
+            elif di_value is None and md_values_available and md_high_conf:
+                # DI missing but markdown has a high-confidence value — adopt markdown value
+                logger.info("Layer 1: Field '%s' — DI missing, adopting markdown value", field)
+                self.__adopt_markdown_value__(field, markdown_result, parsed_data, extracted_data)
+
+            elif di_value is None:
+                # Both missing or markdown not available
+                logger.warning("Layer 1: Field '%s' — missing from both DI and markdown, marking for Layer 2", field)
+                fields_needing_fallback.add(field)
+
+            else:
+                # DI has value but markdown doesn't have the relevant keys — trust DI if high confidence
+                if not di_high_conf:
+                    logger.warning("Layer 1: Field '%s' — DI low confidence, no markdown corroboration, marking for Layer 2", field)
+                    fields_needing_fallback.add(field)
+                else:
+                    logger.info("Layer 1: Field '%s' — DI high confidence, no markdown data, keeping DI value", field)
+
+        # Handle partnership detection from markdown
+        if markdown_result and markdown_result.get('is_partnership') == True:
+            if self.relevant_values.get('partnership') is None:
+                self.relevant_values['partnership'] = True
+                logger.info("Layer 1: Detected partnership from markdown")
+
+        return fields_needing_fallback
+
+
+    def __compare_field_values__(self, field: str, di_value, markdown_result: Dict,
+                                extracted_data: Dict) -> bool:
+        """Compare a parsed DI field value against the corresponding markdown extraction.
+        Returns True if the values effectively agree."""
+        try:
+            if field == 'utilisation':
+                md_bal = markdown_result.get('total_outstanding_balance')
+                md_limit = markdown_result.get('total_limit')
+                if md_bal is not None and md_limit is not None:
+                    md_bal_norm = self.__normalize_numeric_str__(str(md_bal))
+                    md_limit_norm = self.__normalize_numeric_str__(str(md_limit))
+                    # Compare against raw extracted values from DI
+                    di_bal = extracted_data.get('total_outstanding_balance_0') or extracted_data.get('total_outstanding_balance_1')
+                    di_limit = extracted_data.get('total_limit_0') or extracted_data.get('total_limit_1')
+                    if di_bal and di_limit:
+                        return (self.__normalize_numeric_str__(di_bal) == md_bal_norm and
+                                self.__normalize_numeric_str__(di_limit) == md_limit_norm)
+                return False
+
+            elif field == 'special_attention_accounts':
+                if self.report_type == ReportType.INDIVIDUAL:
+                    md_val = markdown_result.get('special_attention_accounts')
+                else:
+                    md_val = markdown_result.get('special_attention_accounts_entity')
+                if md_val is not None and di_value is not None:
+                    # Compare first character (e.g. 'N' vs 'NO', 'Y' vs 'YES')
+                    return str(di_value)[0].upper() == str(md_val)[0].upper()
+                return False
+
+            elif field == 'legal_cases':
+                if self.report_type == ReportType.INDIVIDUAL:
+                    md_np = markdown_result.get('legal_non_personal')
+                    md_p = markdown_result.get('legal_personal')
+                else:
+                    md_np = markdown_result.get('legal_non_personal_entity')
+                    md_p = markdown_result.get('legal_personal_entity')
+                if md_np is not None and md_p is not None:
+                    md_total = int(md_np) + int(md_p)
+                    return int(di_value) == md_total
+                return False
+
+            elif field == 'blacklist':
+                md_has_tr = markdown_result.get('has_trade_reference')
+                md_tr_count = markdown_result.get('trade_reference_count')
+                if md_has_tr is False and di_value == 0:
+                    return True
+                if md_has_tr is True and md_tr_count is not None:
+                    return int(di_value) == int(md_tr_count)
+                return False
+
+            elif field == 'repayment_to_banks':
+                # For repayment_to_banks, compare digit/zero/non-zero tallies between markdown and DI conduct
+                md_conduct = markdown_result.get('ccris_conduct')
+                di_conduct = extracted_data.get('ccris_conduct')
+                if md_conduct is not None and di_conduct is not None and isinstance(di_conduct, list) and len(di_conduct) > 0:
+                    # Count digits/zeroes/non-zeroes from markdown conduct (list of lists of ints)
+                    if isinstance(md_conduct, list) and len(md_conduct) > 0 and isinstance(md_conduct[0], list):
+                        md_digits = sum(len(row) for row in md_conduct)
+                        md_zeroes = sum(1 for row in md_conduct for d in row if d == 0)
+                        md_non_zeroes = md_digits - md_zeroes
+                        
+                        # Count digits/zeroes/non-zeroes from DI conduct (list of strings)
+                        if isinstance(di_conduct[0], str):
+                            di_digits = sum(len(re.sub(r'[^0-9]', '', s)) for s in di_conduct)
+                            di_zeroes = sum(s.count('0') for s in di_conduct)
+                            di_non_zeroes = di_digits - di_zeroes
+                            
+                            if md_digits == di_digits and md_zeroes == di_zeroes and md_non_zeroes == di_non_zeroes:
+                                logger.info("Cross-validation ccris_conduct tally matches: digits=%d zeroes=%d non_zeroes=%d",
+                                           md_digits, md_zeroes, md_non_zeroes)
+                                return True
+                            else:
+                                logger.warning("Cross-validation ccris_conduct tally MISMATCH: md=%d/%d/%d DI=%d/%d/%d",
+                                              md_digits, md_zeroes, md_non_zeroes,
+                                              di_digits, di_zeroes, di_non_zeroes)
+                                return False
+                
+                # If di_value is 'N/A' and markdown has no CCRIS data
+                if di_value == 'N/A' and md_conduct is None:
+                    return True
+                return di_value is not None  # trust DI if it extracted something
+
+            elif field in ('years_in_business', 'type_of_company', 'nature_of_business'):
+                if field == 'years_in_business':
+                    md_reg_date = markdown_result.get('registration_date')
+                    if md_reg_date is not None:
+                        md_years = self.__calculate_years__(md_reg_date)
+                        if md_years is not None and di_value is not None:
+                            return abs(float(di_value) - float(md_years)) < 0.5
+                    return False
+                elif field == 'type_of_company':
+                    md_type = markdown_result.get('type')
+                    if md_type is not None and di_value is not None:
+                        # Both should resolve to the same category
+                        if self.__is_fuzzy_match__(str(md_type), 'limited by shares private limited'):
+                            md_cat = 'Sdn Bhd'
+                        else:
+                            md_cat = 'Non - Sdn Bhd'
+                        return di_value == md_cat
+                    return False
+                elif field == 'nature_of_business':
+                    md_msic = markdown_result.get('msic')
+                    if md_msic is not None and di_value is not None:
+                        return self.__is_fuzzy_match__(str(di_value), str(md_msic))
+                    return False
+
+            elif field in ('turnover', 'net_profit', 'paid_up_capital', 'current_ratio', 'gearing_ratio', 'net_worth', 'retained_profit'):
+                key_map = {
+                    'turnover': 'revenue',
+                    'net_profit': 'profit_after_tax',
+                    'paid_up_capital': 'paid_up_capital',
+                    'current_ratio': 'current_ratio',
+                    'gearing_ratio': 'gearing_ratio',
+                    'net_worth': 'net_worth',
+                    'retained_profit': 'retained_earning',
+                }
+                md_key = key_map.get(field)
+                md_val = markdown_result.get(md_key)
+                if md_val is not None and di_value is not None:
+                    try:
+                        md_dec = self.__to_decimal__(str(md_val))
+                        di_dec = Decimal(str(di_value)) if not isinstance(di_value, Decimal) else di_value
+                        return abs(md_dec - di_dec) < Decimal('0.02')
+                    except (InvalidOperation, ValueError):
+                        return False
+                return False
+
+            elif field == 'financial_report_date':
+                md_fye = markdown_result.get('financial_year_end')
+                if md_fye is not None and di_value is not None:
+                    return str(di_value) == str(md_fye)
+                return False
+
+            elif field == 'net_current_assets':
+                md_ca = markdown_result.get('current_assets')
+                md_cl = markdown_result.get('current_liabilities')
+                if md_ca is not None and md_cl is not None and di_value is not None:
+                    md_nca = self.__to_decimal__(str(md_ca)) - self.__to_decimal__(str(md_cl))
+                    di_dec = Decimal(str(di_value)) if not isinstance(di_value, Decimal) else di_value
+                    return abs(md_nca - di_dec) < Decimal('0.02')
+                return False
+
+            else:
+                # For any unmapped fields, we can't compare — treat as agreeing if DI has a value
+                return di_value is not None
+
+        except (ValueError, TypeError, InvalidOperation) as e:
+            logger.warning("Comparison error for field '%s': %s", field, e)
+            return False
+
+
+    def __adopt_markdown_value__(self, field: str, markdown_result: Dict,
+                                parsed_data: Dict, extracted_data: Dict):
+        """Adopt a value from the markdown extraction into parsed_data when DI is missing."""
+        try:
+            if field == 'utilisation':
+                md_bal = markdown_result.get('total_outstanding_balance')
+                md_limit = markdown_result.get('total_limit')
+                if md_bal is not None and md_limit is not None:
+                    bal = self.__to_decimal__(str(md_bal))
+                    limit = self.__to_decimal__(str(md_limit))
+                    if limit > 0:
+                        parsed_data['utilisation'] = bal / limit * 100
+
+            elif field == 'special_attention_accounts':
+                if self.report_type == ReportType.INDIVIDUAL:
+                    md_val = markdown_result.get('special_attention_accounts')
+                else:
+                    md_val = markdown_result.get('special_attention_accounts_entity')
+                if md_val is not None:
+                    parsed_data['special_attention_accounts'] = str(md_val)
+
+            elif field == 'legal_cases':
+                if self.report_type == ReportType.INDIVIDUAL:
+                    md_np = markdown_result.get('legal_non_personal')
+                    md_p = markdown_result.get('legal_personal')
+                else:
+                    md_np = markdown_result.get('legal_non_personal_entity')
+                    md_p = markdown_result.get('legal_personal_entity')
+                if md_np is not None and md_p is not None:
+                    parsed_data['legal_cases'] = int(md_np) + int(md_p)
+
+            elif field == 'blacklist':
+                md_has_tr = markdown_result.get('has_trade_reference')
+                md_tr_count = markdown_result.get('trade_reference_count')
+                if md_has_tr is False:
+                    parsed_data['blacklist'] = 0
+                elif md_has_tr is True and md_tr_count is not None:
+                    parsed_data['blacklist'] = int(md_tr_count)
+
+            elif field == 'years_in_business':
+                md_reg_date = markdown_result.get('registration_date')
+                if md_reg_date is not None:
+                    years = self.__calculate_years__(md_reg_date)
+                    if years is not None:
+                        parsed_data['years_in_business'] = years
+
+            elif field == 'type_of_company':
+                md_type = markdown_result.get('type')
+                if md_type is not None:
+                    if self.__is_fuzzy_match__(str(md_type), 'limited by shares private limited'):
+                        parsed_data['type_of_company'] = 'Sdn Bhd'
+                    else:
+                        parsed_data['type_of_company'] = 'Non - Sdn Bhd'
+
+            elif field == 'nature_of_business':
+                md_msic = markdown_result.get('msic')
+                if md_msic is not None:
+                    parsed_data['nature_of_business'] = str(md_msic)
+
+            elif field == 'paid_up_capital':
+                md_val = markdown_result.get('paid_up_capital')
+                if md_val is not None:
+                    parsed_data['paid_up_capital'] = self.__to_decimal__(str(md_val))
+
+            elif field == 'financial_report_date':
+                md_fye = markdown_result.get('financial_year_end')
+                if md_fye is not None:
+                    parsed_data['financial_report_date'] = str(md_fye)
+
+            elif field == 'turnover':
+                md_val = markdown_result.get('revenue')
+                if md_val is not None:
+                    parsed_data['turnover'] = self.__to_decimal__(str(md_val))
+
+            elif field == 'net_profit':
+                md_val = markdown_result.get('profit_after_tax')
+                if md_val is not None:
+                    parsed_data['net_profit'] = self.__to_decimal__(str(md_val))
+
+            elif field == 'net_current_assets':
+                md_ca = markdown_result.get('current_assets')
+                md_cl = markdown_result.get('current_liabilities')
+                if md_ca is not None and md_cl is not None:
+                    ca = self.__to_decimal__(str(md_ca))
+                    cl = self.__to_decimal__(str(md_cl))
+                    parsed_data['net_current_assets'] = ca - cl
+            
+            elif field == 'net_worth':
+                md_val = markdown_result.get('net_worth')
+                if md_val is not None:
+                    parsed_data['net_worth'] = self.__to_decimal__(str(md_val))
+            
+            elif field == 'retained_profit':
+                md_val = markdown_result.get('retained_earning')
+                if md_val is not None:
+                    parsed_data['retained_profit'] = self.__to_decimal__(str(md_val))
+
+            elif field == 'current_ratio':
+                md_val = markdown_result.get('current_ratio')
+                if md_val is not None:
+                    parsed_data['current_ratio'] = self.__to_decimal__(str(md_val))
+
+            elif field == 'gearing_ratio':
+                md_val = markdown_result.get('gearing_ratio')
+                if md_val is not None:
+                    parsed_data['gearing_ratio'] = self.__to_decimal__(str(md_val))
+
+        except (ValueError, TypeError, InvalidOperation) as e:
+            logger.warning("Failed to adopt markdown value for field '%s': %s", field, e)
+    
+    def __run_layer2_image_fallback__(self, extracted_data: Dict, parsed_data: Dict,
+                                     fields_needing_fallback: set, markdown_result: Dict):
+        """Runs targeted image extraction for fields still needing fallback."""
+
+        # Map parsed_data fields to the table tags used for image extraction
+        field_to_tags = {
+            'utilisation': ['ccris_summary'],
+            'repayment_to_banks': ['ccris_detail'],
+            'special_attention_accounts': ['credit_info_at_a_glance', 'ccris_summary'],
+            'legal_cases': ['credit_info_at_a_glance'],
+            'years_in_business': ['snapshot'],
+            'type_of_company': ['snapshot'],
+            'nature_of_business': ['snapshot'],
+            'paid_up_capital': ['financials_and_shareholders'],
+            'financial_report_date': ['financial_statements'],
+            'turnover': ['financial_statements'],
+            'net_profit': ['financial_statements'],
+            'retained_profit': ['financial_statements'],
+            'net_worth': ['financial_statements'],
+            'net_current_assets': ['financial_statements'],
+            'current_ratio': ['financial_statements'],
+            'gearing_ratio': ['financial_statements'],
+        }
+
+        # Collect unique tags to avoid duplicate API calls
+        tags_to_call = set()
+        for field in fields_needing_fallback:
+            for tag in field_to_tags.get(field, []):
+                tags_to_call.add(tag)
+
+        # Special handling: if repayment_to_banks needs fallback and we have conduct but no balance/limit
+        if 'repayment_to_banks' in fields_needing_fallback:
+            if extracted_data.get('ccris_conduct') is not None and (
+                    extracted_data.get('total_outstanding_balance_1') is None or
+                    extracted_data.get('total_limit_1') is None):
+                tags_to_call.discard('ccris_detail')
+                tags_to_call.add('ccris_detail_edge_case')
+
+        logger.info("Layer 2 image tags to call: %s", tags_to_call)
+
+        # Execute each image extraction and merge results
+        for tag in tags_to_call:
+            try:
+                image_result, image_choice = self.extract_using_markdown_and_image_with_confidence(tag)
+            except Exception as e:
+                logger.error("Layer 2 image extraction failed for tag '%s': %s", tag, e, exc_info=True)
+                continue
+
+            if not image_result:
+                logger.warning("Layer 2 image extraction returned no result for tag '%s'", tag)
+                continue
+
+            # Evaluate OpenAI confidence for this extraction
+            confidence_l2 = {}
+            if image_choice:
+                confidence_l2 = evaluate_confidence_openai(
+                    extract_result=image_result,
+                    choice=image_choice
+                )
+                logger.info("Layer 2 confidence for tag '%s': %s", tag, confidence_l2)
+
+            # Merge based on tag
+            if tag == 'ccris_summary':
+                if parsed_data.get('utilisation') is None:
+                    if image_result.get('total_outstanding_balance') is not None and image_result.get('total_limit') is not None:
+                        bal = self.__to_decimal__(str(image_result['total_outstanding_balance']))
+                        limit = self.__to_decimal__(str(image_result['total_limit']))
+                        if limit > 0:
+                            parsed_data['utilisation'] = bal / limit * 100
+                if parsed_data.get('special_attention_accounts') is None and image_result.get('special_attention_accounts') is not None:
+                    parsed_data['special_attention_accounts'] = image_result['special_attention_accounts']
+
+            elif tag in ('ccris_detail', 'ccris_detail_edge_case'):
+                if image_result.get('ccris_conduct') is not None:
+                    conduct = image_result['ccris_conduct']
+                    if isinstance(conduct, list) and len(conduct) > 0:
+                        # Tally check against md extraction
+                        if isinstance(conduct[0], list):
+                            total_digits = sum(len(row) for row in conduct)
+                            total_zeroes = sum(1 for row in conduct for d in row if d == 0)
+                            total_non_zeroes = total_digits - total_zeroes
+
+                            md_conduct = markdown_result.get('ccris_conduct')
+                            if md_conduct and isinstance(md_conduct, list) and len(md_conduct) > 0:
+                                if isinstance(md_conduct[0], list):
+                                    md_digits = sum(len(row) for row in md_conduct)
+                                    md_zeroes = sum(1 for row in md_conduct for d in row if d == 0)
+                                    md_non_zeroes = md_digits - md_zeroes
+                                    if total_digits == md_digits and total_zeroes == md_zeroes and total_non_zeroes == md_non_zeroes:
+                                        logger.info("Layer 2 ccris_conduct tally matches markdown extraction: digits=%d zeroes=%d non_zeroes=%d",
+                                                     total_digits, total_zeroes, total_non_zeroes)
+                                    else:
+                                        logger.warning("Layer 2 ccris_conduct tally MISMATCH: image=%d/%d/%d md=%d/%d/%d",
+                                                       total_digits, total_zeroes, total_non_zeroes,
+                                                       md_digits, md_zeroes, md_non_zeroes)
+
+                            if total_digits > 0:
+                                parsed_data['repayment_to_banks'] = self.__parse_conduct_values_image__(conduct)
+
+                if extracted_data.get('total_outstanding_balance_1') is None and image_result.get('total_outstanding_balance') is not None:
+                    extracted_data['total_outstanding_balance_1'] = str(image_result['total_outstanding_balance'])
+                if extracted_data.get('total_limit_1') is None and image_result.get('total_limit') is not None:
+                    extracted_data['total_limit_1'] = str(image_result['total_limit'])
+
+                # Re-try utilisation with updated data
+                if parsed_data.get('utilisation') is None:
+                    util_keys = ['total_outstanding_balance_0', 'total_outstanding_balance_1', 'total_limit_0', 'total_limit_1']
+                    if all(extracted_data.get(key) is not None for key in util_keys):
+                        bal = self.__to_decimal__(extracted_data['total_outstanding_balance_0'])
+                        limit = self.__to_decimal__(extracted_data['total_limit_0'])
+                        if limit > 0:
+                            parsed_data['utilisation'] = bal / limit * 100
+
+            elif tag == 'credit_info_at_a_glance':
+                if parsed_data.get('special_attention_accounts') is None:
+                    spa_key = 'special_attention_accounts_entity' if self.report_type == ReportType.COMPANY else 'special_attention_accounts'
+                    if image_result.get(spa_key) is not None:
+                        parsed_data['special_attention_accounts'] = image_result[spa_key]
+
+                if parsed_data.get('legal_cases') is None:
+                    if self.report_type == ReportType.INDIVIDUAL:
+                        lnp = image_result.get('legal_non_personal')
+                        lp = image_result.get('legal_personal')
+                    else:
+                        lnp = image_result.get('legal_non_personal_entity')
+                        lp = image_result.get('legal_personal_entity')
+                    if lnp is not None and lp is not None:
+                        try:
+                            lnp_int = int(lnp)
+                            lp_int = int(lp)
+                            parsed_data['legal_cases'] = lnp_int + lp_int
+                        except (ValueError, TypeError):
+                            if str(lnp) == '0' and str(lp) == '0':
+                                parsed_data['legal_cases'] = 0
+
+            elif tag == 'snapshot':
+                if parsed_data.get('years_in_business') is None and image_result.get('registration_date') is not None:
+                    years = self.__calculate_years__(image_result['registration_date'])
+                    if years is not None:
+                        parsed_data['years_in_business'] = years
+                if parsed_data.get('type_of_company') is None and image_result.get('type') is not None:
+                    type_val = image_result['type']
+                    if self.__is_fuzzy_match__(type_val, 'limited by shares private limited'):
+                        parsed_data['type_of_company'] = 'Sdn Bhd'
+                    else:
+                        parsed_data['type_of_company'] = 'Non - Sdn Bhd'
+                if parsed_data.get('nature_of_business') is None and image_result.get('msic') is not None:
+                    parsed_data['nature_of_business'] = image_result['msic']
+                if image_result.get('is_partnership') == True:
+                    self.relevant_values['partnership'] = True
+
+            elif tag == 'financials_and_shareholders':
+                if parsed_data.get('paid_up_capital') is None and image_result.get('paid_up_capital') is not None:
+                    parsed_data['paid_up_capital'] = self.__to_decimal__(str(image_result['paid_up_capital']))
+
+            elif tag == 'financial_statements':
+                logger.info("Layer 2 financial statements data: %s", json.dumps(image_result, indent=2))
+                if parsed_data.get('financial_report_date') is None and image_result.get('financial_year_end') is not None:
+                    parsed_data['financial_report_date'] = image_result['financial_year_end']
+                if parsed_data.get('turnover') is None and image_result.get('revenue') is not None:
+                    parsed_data['turnover'] = self.__to_decimal__(str(image_result['revenue']))
+                if parsed_data.get('net_profit') is None and image_result.get('profit_after_tax') is not None:
+                    parsed_data['net_profit'] = self.__to_decimal__(str(image_result['profit_after_tax']))
+                if parsed_data.get('retained_profit') is None and image_result.get('retained_earning') is not None:
+                    parsed_data['retained_profit'] = self.__to_decimal__(str(image_result['retained_earning']))
+                if parsed_data.get('net_worth') is None and image_result.get('net_worth') is not None:
+                    parsed_data['net_worth'] = self.__to_decimal__(str(image_result['net_worth']))
+
+                if parsed_data.get('net_current_assets') is None:
+                    fs_keys = ['current_assets', 'current_liabilities', 'non_current_assets', 'total_assets',
+                               'non_current_liabilities', 'long_term_liabilities', 'total_liabilities']
+                    if all(image_result.get(k) is not None for k in fs_keys):
+                        nca = self.__to_decimal__(str(image_result['non_current_assets']))
+                        ca = self.__to_decimal__(str(image_result['current_assets']))
+                        ta = self.__to_decimal__(str(image_result['total_assets']))
+                        ncl = self.__to_decimal__(str(image_result['non_current_liabilities']))
+                        cl = self.__to_decimal__(str(image_result['current_liabilities']))
+                        ltl = self.__to_decimal__(str(image_result['long_term_liabilities']))
+                        tl = self.__to_decimal__(str(image_result['total_liabilities']))
+                        if (ta == nca + ca) and (tl == ncl + cl + ltl):
+                            parsed_data['net_current_assets'] = ca - cl
+                        else:
+                            logger.error("Layer 2: Balance sheet validation failed")
+
+                if parsed_data.get('current_ratio') is None and image_result.get('current_ratio') is not None:
+                    extracted_cr = self.__to_decimal__(str(image_result['current_ratio']))
+                    if image_result.get('current_assets') is not None and image_result.get('current_liabilities') is not None:
+                        ca = self.__to_decimal__(str(image_result['current_assets']))
+                        cl = self.__to_decimal__(str(image_result['current_liabilities']))
+                        cr = ca / cl if cl > 0 else Decimal(0)
+                        if abs(cr - extracted_cr) < Decimal('0.01'):
+                            parsed_data['current_ratio'] = extracted_cr
+
+                if parsed_data.get('gearing_ratio') is None and image_result.get('gearing_ratio') is not None:
+                    if image_result.get('total_liabilities') is not None and image_result.get('net_worth') is not None:
+                        tl = self.__to_decimal__(str(image_result['total_liabilities']))
+                        nw = self.__to_decimal__(str(image_result['net_worth']))
+                        extracted_gr = self.__to_decimal__(str(image_result['gearing_ratio']))
+                        calc_gr = tl / nw if nw > 0 else Decimal(0)
+                        if abs(extracted_gr - calc_gr) < Decimal('0.01'):
+                            parsed_data['gearing_ratio'] = extracted_gr
+
+    def extract_using_markdown_with_confidence(self, prompt: str) -> Tuple[Optional[Dict], Optional[Any]]:
+        """Extract data from markdown and return (result_dict, choice) for confidence evaluation."""
+        markdown = self.result.content
+        if not markdown:
+            return None, None
+
+        client = self.__get_openai_client__(self.options)
+
+        user_content = [{"type": "text", "text": prompt}, {"type": "text", "text": markdown}]
+
+        try:
+            completion = client.chat.completions.create(
+                model=self.options.deployment_name,
+                messages=[
+                    {"role": "system", "content": self.options.system_prompt},
+                    {"role": "user", "content": user_content}
+                ],
+                max_tokens=self.options.max_tokens,
+                temperature=self.options.temperature,
+                top_p=self.options.top_p,
+                logprobs=True,
+                response_format={"type": "json_object"}
+            )
+        except Exception as e:
+            logger.error("Markdown extraction failed: %s", e, exc_info=True)
+            return None, None
+
+        choice = completion.choices[0]
+        raw_content = choice.message.content
+
+        try:
+            response_obj_dict = json.loads(raw_content)
+            return response_obj_dict, choice
+        except json.JSONDecodeError:
+            logger.error("Failed to decode JSON from markdown extraction: %s", raw_content[:200])
+            return None, None
+
+    def extract_using_markdown_and_image_with_confidence(self, table_tag: str) -> Tuple[Optional[Dict], Optional[Any]]:
+        """Extract data from markdown + images and return (result_dict, choice) for confidence evaluation."""
+        markdown = self.result.content
+        if not markdown:
+            return None, None
+
+        client = self.__get_openai_client__(self.options)
+
+        page_start, page_end = self.__get_page_range_for_table_tag__(table_tag)
+        if page_start is None or page_end is None:
+            page_start, page_end = 1, len(self.result.pages)
+
+        image_uris = self.__get_document_image_uris__(self.bytes, page_start, page_end)
+        table_prompt = self.__get_prompt_for_table_tag__(table_tag)
+
+        user_content = [{"type": "text", "text": table_prompt}, {"type": "text", "text": markdown}]
+        for image_uri in image_uris:
+            user_content.append({
+                "type": "image_url",
+                "image_url": {"url": image_uri, "detail": "high"}
+            })
+
+        try:
+            completion = client.chat.completions.create(
+                model=self.options.deployment_name,
+                messages=[
+                    {"role": "system", "content": self.options.system_prompt},
+                    {"role": "user", "content": user_content}
+                ],
+                max_tokens=self.options.max_tokens,
+                temperature=self.options.temperature,
+                top_p=self.options.top_p,
+                logprobs=True,
+                response_format={"type": "json_object"}
+            )
+        except Exception as e:
+            logger.error("Image extraction failed for tag '%s': %s", table_tag, e, exc_info=True)
+            return None, None
+
+        choice = completion.choices[0]
+        raw_content = choice.message.content
+
+        try:
+            response_obj_dict = json.loads(raw_content)
+            return response_obj_dict, choice
+        except json.JSONDecodeError:
+            logger.error("Failed to decode JSON from image extraction (tag=%s): %s", table_tag, raw_content[:200])
+            return None, None
+
+    def extract_using_markdown(self, prompt: str):
+        """Extract data from markdown generated from Azure Document Intelligence."""
+        result, _ = self.extract_using_markdown_with_confidence(prompt)
+        return result
+
+    def extract_using_markdown_and_image(self, table_tag: str):
+        """Extract data from markdown content and images of document pages."""
+        result, _ = self.extract_using_markdown_and_image_with_confidence(table_tag)
+        return result
 
     def __identify_tables_from_json__(self) -> List[Dict]:
         """Identify relevant tables."""
@@ -882,407 +2197,6 @@ class DocumentDataExtractor:
 
         return extracted_values
 
-    def __parse_extracted_data__(self, extracted_data: Dict):
-        """Parses and validates extracted data into final structured format."""
-        logger.debug("Parsing extracted data keys: %s", list(extracted_data.keys()))
-
-        parsed_data = {}
-        if self.report_type == ReportType.INDIVIDUAL:
-               
-            if extracted_data.get('ccris_conduct') is not None and extracted_data.get('total_outstanding_balance_1') is None and extracted_data.get('total_limit_1') is None:
-                logger.info("CCRIS Detail edge case detected.")
-                details_image_data = self.extract_using_markdown_and_image('ccris_detail_edge_case')
-            else:
-                details_image_data = self.extract_using_markdown_and_image('ccris_detail')
-
-            if details_image_data:
-                if details_image_data.get('ccris_conduct') is not None:
-                    logger.info("CCRIS Conduct data extracted from image: %s", details_image_data['ccris_conduct'])
-                    parsed_data['repayment_to_banks'] = self.__parse_conduct_values_image__(details_image_data['ccris_conduct'])
-                
-                if extracted_data.get('total_outstanding_balance_1') is None and details_image_data.get('total_outstanding_balance_1') is not None:
-                    extracted_data['total_outstanding_balance_1'] = details_image_data['total_outstanding_balance_1']
-                
-                if extracted_data.get('total_limit_1') is None and details_image_data.get('total_limit_1') is not None:
-                    extracted_data['total_limit_1'] = details_image_data['total_limit_1']
-            else:
-                logger.error("CCRIS Details image extraction failed. Using fallback from document intelligence. This may impact the accuracy of these fields.")
-            
-            # parsed ccris_conduct from document intelligence is only used as a reference. The actual repayment_to_banks value is extracted from image extraction.
-            if parsed_data.get('repayment_to_banks') is None:
-                if extracted_data.get('ccris_conduct'):
-                    parsed_data['repayment_to_banks'] = self.__parse_conduct_values__(extracted_data['ccris_conduct'])
-                else:
-                    logger.error("CCRIS Conduct data not found in both table and image extraction. Repayment to banks field will be missing.")
-
-            util_keys = ['total_outstanding_balance_0', 'total_outstanding_balance_1', 'total_limit_0', 'total_limit_1']
-            if all(extracted_data.get(key) is not None for key in util_keys):
-                if self.__normalize_numeric_str__(extracted_data['total_outstanding_balance_0']) == self.__normalize_numeric_str__(extracted_data['total_outstanding_balance_1']) and self.__normalize_numeric_str__(extracted_data['total_limit_0']) == self.__normalize_numeric_str__(extracted_data['total_limit_1']):
-                    bal = self.__to_decimal__(extracted_data['total_outstanding_balance_0'])
-                    limit = self.__to_decimal__(extracted_data['total_limit_0'])
-                    if limit > 0:
-                        utilisation = bal / limit * 100
-                        parsed_data['utilisation'] = utilisation
-
-            spa_keys = ['special_attention_accounts_0', 'special_attention_accounts_1']
-            if all(extracted_data.get(key) is not None for key in spa_keys):
-                # saa_0 is 'NO', saa_1 is 'N'
-                str = extracted_data['special_attention_accounts_0']
-                if str[0] == extracted_data['special_attention_accounts_1']:
-                    parsed_data['special_attention_accounts'] = extracted_data['special_attention_accounts_0']
-
-            legal_keys = ['legal_non_personal', 'legal_personal']
-            if all(extracted_data.get(key) is not None for key in legal_keys):
-                if extracted_data['legal_non_personal'] == '0' and extracted_data['legal_personal'] == '0' and self.relevant_values.get('legal_cases') is None:
-                    parsed_data['legal_cases'] = 0
-                else:
-                    np = int(extracted_data['legal_non_personal'])
-                    p = int(extracted_data['legal_personal'])
-                    calc = np + p
-                    if extracted_data.get('legal_cases_count') is not None:
-                        if calc == extracted_data['legal_cases_count']:
-                            parsed_data['legal_cases'] = calc
-
-            if self.relevant_values.get('trade_reference') is not None:
-                if extracted_data.get('trade_reference_count') is not None:
-                    parsed_data['blacklist'] = extracted_data['trade_reference_count']
-                else:
-                    # trade reference table detected but count not extracted so try fallback
-                    # TODO markdown
-                    pass
-            elif self.relevant_values.get('trade_reference') is None:
-                parsed_data['blacklist'] = 0
-
-            # use ai as fallback. this needs to be async
-            if parsed_data.get('utilisation') is None:
-                logger.info("Utilisation not found from table extraction, falling back to image extraction")
-                summary_image_data = self.extract_using_markdown_and_image('ccris_summary')
-                if summary_image_data:
-                    if summary_image_data.get('total_outstanding_balance') is not None and summary_image_data.get('total_limit') is not None:
-                        bal = self.__to_decimal__(summary_image_data['total_outstanding_balance'])
-                        limit = self.__to_decimal__(summary_image_data['total_limit'])
-                        if limit > 0:
-                            utilisation = bal / limit * 100
-                            parsed_data['utilisation'] = utilisation
-                    
-                    if parsed_data.get('special_attention_accounts') is None and summary_image_data.get('special_attention_accounts') is not None:
-                        parsed_data['special_attention_accounts'] = summary_image_data['special_attention_accounts']
-
-            if (parsed_data.get('special_attention_accounts') is None) or (parsed_data.get('legal_cases') is None):
-                logger.info("Special attention accounts or legal cases not found from table extraction, falling back to image extraction")
-                credit_image_data = self.extract_using_markdown_and_image('credit_info_at_a_glance')
-                if credit_image_data:
-                    if parsed_data.get('special_attention_accounts') is None and credit_image_data.get('special_attention_accounts') is not None:
-                        parsed_data['special_attention_accounts'] = credit_image_data['special_attention_accounts']
-                    else:
-                        logger.error("Special attention accounts not found in image extraction for special_attention_accounts assignment")
-
-                    if parsed_data.get('legal_cases') is None and credit_image_data.get('legal_non_personal') is not None and credit_image_data.get('legal_personal') is not None:
-                        if credit_image_data['legal_non_personal'] == '0' and credit_image_data['legal_personal'] == '0':
-                            parsed_data['legal_cases'] = 0
-                        else:
-                            np = int(credit_image_data['legal_non_personal'])
-                            p = int(credit_image_data['legal_personal'])
-                            parsed_data['legal_cases'] = np + p
-                    else:
-                        logger.error("Legal cases not found in image extraction for legal_cases assignment")
-
-
-            
-        elif self.report_type == ReportType.COMPANY:
-            
-            util_keys = ['total_outstanding_balance_0', 'total_outstanding_balance_1', 'total_limit_0', 'total_limit_1']
-            if all(extracted_data.get(key) is None for key in util_keys) and extracted_data.get('ccris_conduct') is None:
-                parsed_data['repayment_to_banks'] = 'N/A'
-                parsed_data['utilisation'] = 'N/A'
-            else:
-                if extracted_data.get('ccris_conduct') is not None and extracted_data.get('total_outstanding_balance_1') is None and extracted_data.get('total_limit_1') is None:
-                    details_image_data = self.extract_using_markdown_and_image('ccris_detail_edge_case')
-                else:
-                    details_image_data = self.extract_using_markdown_and_image('ccris_detail')
-
-                if details_image_data:
-                    if details_image_data.get('ccris_conduct') is not None:
-                        logger.info("CCRIS Conduct data extracted from image: %s", details_image_data['ccris_conduct'])
-                        parsed_data['repayment_to_banks'] = self.__parse_conduct_values_image__(details_image_data['ccris_conduct'])
-                    
-                    if extracted_data.get('total_outstanding_balance_1') is None and details_image_data.get('total_outstanding_balance_1') is not None:
-                        extracted_data['total_outstanding_balance_1'] = details_image_data['total_outstanding_balance_1']
-                    
-                    if extracted_data.get('total_limit_1') is None and details_image_data.get('total_limit_1') is not None:
-                        extracted_data['total_limit_1'] = details_image_data['total_limit_1']
-                else:
-                    logger.error("CCRIS Details image extraction failed. Using fallback from document intelligence. This may impact the accuracy of these fields.")
-                
-                # parsed ccris_conduct from document intelligence is only used as a reference. The actual repayment_to_banks value is extracted from image extraction.
-                if parsed_data.get('repayment_to_banks') is None:
-                    if extracted_data.get('ccris_conduct'):
-                        parsed_data['repayment_to_banks'] = self.__parse_conduct_values__(extracted_data['ccris_conduct'])
-                    else:
-                        logger.error("CCRIS Conduct data not found in both table and image extraction. Repayment to banks field will be missing.")
-                
-                util_keys = ['total_outstanding_balance_0', 'total_outstanding_balance_1', 'total_limit_0', 'total_limit_1']
-                if all(extracted_data.get(key) is not None for key in util_keys):
-                    if self.__normalize_numeric_str__(extracted_data['total_outstanding_balance_0']) == self.__normalize_numeric_str__(extracted_data['total_outstanding_balance_1']) and self.__normalize_numeric_str__(extracted_data['total_limit_0']) == self.__normalize_numeric_str__(extracted_data['total_limit_1']):
-                        bal = self.__to_decimal__(extracted_data['total_outstanding_balance_0'])
-                        limit = self.__to_decimal__(extracted_data['total_limit_0'])
-                        if limit > 0:
-                            utilisation = bal / limit * 100
-                            parsed_data['utilisation'] = utilisation
-
-                if parsed_data.get('utilisation') is None:
-                    logger.info("Utilisation not found from table extraction, falling back to image extraction")
-                    summary_image_data = self.extract_using_markdown_and_image('ccris_summary')
-                    if summary_image_data and summary_image_data.get('total_outstanding_balance') is not None and summary_image_data.get('total_limit') is not None:
-                        bal = self.__to_decimal__(summary_image_data['total_outstanding_balance'])
-                        limit = self.__to_decimal__(summary_image_data['total_limit'])
-                        if limit > 0:
-                            utilisation = bal / limit * 100
-                            parsed_data['utilisation'] = utilisation
-                    else:
-                        logger.error("Utilisation data not found in image extraction for utilisation calculation")
-                        
-
-            if extracted_data.get('special_attention_accounts_entity') is not None:
-                parsed_data['special_attention_accounts'] = extracted_data['special_attention_accounts_entity']
-
-            legal_keys = ['legal_non_personal_entity', 'legal_personal_entity']
-            if all(extracted_data.get(key) is not None for key in legal_keys):
-                if extracted_data['legal_non_personal_entity'] == '0' and extracted_data['legal_personal_entity'] == '0' and self.relevant_values.get('legal_cases') is None:
-                    parsed_data['legal_cases'] = 0
-                else:
-                    np = int(extracted_data['legal_non_personal_entity'])
-                    p = int(extracted_data['legal_personal_entity'])
-                    calc = np + p
-                    if extracted_data.get('legal_cases_count') is not None:
-                        if calc == extracted_data['legal_cases_count']:
-                            parsed_data['legal_cases'] = calc
-
-            if self.relevant_values.get('trade_reference') is not None:
-                if extracted_data.get('trade_reference_count') is not None:
-                    parsed_data['blacklist'] = extracted_data['trade_reference_count']
-                else:
-                    # trade reference table detected but count not extracted so try fallback
-                    # TODO markdown
-                    pass
-            
-            if self.relevant_values.get('trade_reference') is None:
-                parsed_data['blacklist'] = 0
-
-            if (parsed_data.get('special_attention_accounts') is None) or (parsed_data.get('legal_cases') is None):
-                logger.info("Special attention accounts or legal cases not found from table extraction, falling back to image extraction")
-                credit_image_data = self.extract_using_markdown_and_image('credit_info_at_a_glance')
-                if credit_image_data:
-                    if parsed_data.get('special_attention_accounts') is None and credit_image_data.get('special_attention_accounts_entity') is not None:
-                        parsed_data['special_attention_accounts'] = credit_image_data['special_attention_accounts_entity']
-                    else:
-                        logger.error("Special attention accounts not found in image extraction for special_attention_accounts assignment")
-
-                    if parsed_data.get('legal_cases') is None and credit_image_data.get('legal_non_personal_entity') is not None and credit_image_data.get('legal_personal_entity') is not None:
-                        if credit_image_data['legal_non_personal_entity'] == '0' and credit_image_data['legal_personal_entity'] == '0':
-                            parsed_data['legal_cases'] = 0
-                        else:
-                            np = int(credit_image_data['legal_non_personal_entity'])
-                            p = int(credit_image_data['legal_personal_entity'])
-                            parsed_data['legal_cases'] = np + p
-                    else:
-                        logger.error("Legal cases not found in image extraction for legal_cases assignment")
-
-            # DEBUG. CHECK WHICH KEYS ARE NOT PRESENT
-            for key in ['special_attention_accounts', 'legal_cases', 'utilisation', 'repayment_to_banks']:
-                if parsed_data.get(key) is None:
-                    logger.error("Key %s not found in parsed data", key)
-
-            if extracted_data.get('registration_date') is not None:
-                parsed_data['years_in_business'] = self.__calculate_years__(extracted_data['registration_date'])
-
-            if extracted_data.get('type') is not None:
-                type = extracted_data['type']
-                if self.__is_fuzzy_match__(type, 'limited by shares private limited'):
-                    parsed_data['type_of_company'] = 'Sdn Bhd'
-                else: 
-                    parsed_data['type_of_company'] = 'Non - Sdn Bhd'
-            
-            if extracted_data.get('msic') is not None:
-                parsed_data['nature_of_business'] = extracted_data['msic']
-            
-            if parsed_data.get('years_in_business') is None or parsed_data.get('type_of_company') is None or parsed_data.get('nature_of_business') is None:
-                logger.info("Snapshot data incomplete from table extraction, falling back to image extraction")
-                snapshot_image_data = self.extract_using_markdown_and_image('snapshot')
-                if snapshot_image_data:
-                    if parsed_data.get('years_in_business') is None and snapshot_image_data.get('registration_date') is not None:
-                        parsed_data['years_in_business'] = self.__calculate_years__(snapshot_image_data['registration_date'])
-                    
-                    if parsed_data.get('type_of_company') is None and snapshot_image_data.get('type') is not None:
-                        parsed_data['type_of_company'] = snapshot_image_data['type']
-                    
-                    if parsed_data.get('nature_of_business') is None and snapshot_image_data.get('msic') is not None:
-                        parsed_data['nature_of_business'] = snapshot_image_data['msic']
-                    
-                    if snapshot_image_data.get('is_partnership') == True:
-                        self.relevant_values['partnership'] = True
-
-            # DEBUG. CHECK WHICH KEYS ARE NOT PRESENT
-            for key in ['years_in_business', 'type_of_company', 'nature_of_business']:
-                if parsed_data.get(key) is None:
-                    logger.error("Key %s not found in parsed data", key)
-
-            if self.relevant_values.get('partnership') is not None and parsed_data.get('type_of_company') == 'Non - Sdn Bhd':
-                # partnership form does not need paid_up_capital
-                #parsed_data['paid_up_capital'] = 'N/A'
-                parsed_data['financial_report_date'] = 'N/A'
-                parsed_data['turnover'] = 'N/A'
-                parsed_data['net_profit'] = 'N/A'
-                parsed_data['retained_profit'] = 'N/A'
-                parsed_data['net_worth'] = 'N/A'
-                parsed_data['net_current_assets'] = 'N/A'
-                parsed_data['current_ratio'] = 'N/A'
-                parsed_data['gearing_ratio'] = 'N/A'
-                if extracted_data.get('partner_count') is not None:
-                    parsed_data['number_of_directors_or_partners'] = extracted_data['partner_count']
-                else:
-                    # partnership detected but number of partners not found
-                    # TODO markdown
-                    pass
-            else:
-                if extracted_data.get('director_count') is not None:
-                    parsed_data['number_of_directors_or_partners'] = extracted_data['director_count']
-                else:
-                    # director count not found
-                    # TODO markdown
-                    pass
-
-                if extracted_data.get('paid_up_capital') is not None:
-                    parsed_data['paid_up_capital'] = self.__to_decimal__(extracted_data['paid_up_capital'])
-            
-                if extracted_data.get('financial_year_end') is not None:
-                    parsed_data['financial_report_date'] = self.__reformat_date__(extracted_data['financial_year_end'])
-
-                if extracted_data.get('revenue_0') is not None and extracted_data.get('revenue_1') is not None:
-                    if self.__normalize_numeric_str__(extracted_data['revenue_0']) == self.__normalize_numeric_str__(extracted_data['revenue_1']):
-                        parsed_data['turnover'] = self.__to_decimal__(extracted_data['revenue_0'])
-                    elif self.__normalize_numeric_str__(extracted_data['revenue_0']) == '0' and self.__normalize_numeric_str__(extracted_data['revenue_1']) == '0':
-                        parsed_data['turnover'] = Decimal(0)
-                    
-                if extracted_data.get('profit_after_tax_0') is not None and extracted_data.get('profit_after_tax_1') is not None:
-                    if self.__normalize_numeric_str__(extracted_data['profit_after_tax_0']) == self.__normalize_numeric_str__(extracted_data['profit_after_tax_1']):
-                        parsed_data['net_profit'] = self.__to_decimal__(extracted_data['profit_after_tax_0'])
-                    elif self.__normalize_numeric_str__(extracted_data['profit_after_tax_0']) == '0' and self.__normalize_numeric_str__(extracted_data['profit_after_tax_1']) == '0':
-                        parsed_data['net_profit'] = Decimal(0)
-                 
-                if extracted_data.get('retained_earning') is not None:
-                    parsed_data['retained_profit'] = self.__to_decimal__(extracted_data['retained_earning'])
-
-                if extracted_data.get('net_worth') is not None:
-                    parsed_data['net_worth'] = self.__to_decimal__(extracted_data['net_worth'])
-
-                fs_key = ['current_assets', 'current_liabilities', 'non_current_assets', 'total_assets', 'non_current_liabilities', 'long_term_liabilities', 'total_liabilities']
-                if all(extracted_data.get(key) is not None for key in fs_key):
-                    nca = self.__to_decimal__(extracted_data['non_current_assets'])
-                    ca = self.__to_decimal__(extracted_data['current_assets'])
-                    ta = self.__to_decimal__(extracted_data['total_assets'])
-                    ncl = self.__to_decimal__(extracted_data['non_current_liabilities'])
-                    cl = self.__to_decimal__(extracted_data['current_liabilities'])
-                    ltl = self.__to_decimal__(extracted_data['long_term_liabilities'])
-                    tl = self.__to_decimal__(extracted_data['total_liabilities'])
-
-                    valid_ca_cl = (ta == nca + ca) and (tl == ncl + cl + ltl)
-                    if valid_ca_cl:
-                        parsed_data['net_current_assets'] = ca - cl
-                        if extracted_data.get('current_ratio') is not None:
-                            extracted_cr = self.__to_decimal__(extracted_data['current_ratio'])
-                            cr = ca / cl if cl > 0 else Decimal(0)
-                            if abs(cr - extracted_cr) < Decimal('0.01'):
-                                parsed_data['current_ratio'] = extracted_cr
-
-                bal_key = ['gearing_ratio', 'debt_to_equity_ratio', 'net_worth', 'total_liabilities']
-                if all(extracted_data.get(key) is not None for key in bal_key):
-                    tl = self.__to_decimal__(extracted_data['total_liabilities'])
-                    nw = self.__to_decimal__(extracted_data['net_worth'])
-                    calculated_gr = tl / nw if nw > 0 else Decimal(0)
-                    extracted_gr = self.__to_decimal__(extracted_data['gearing_ratio'])
-                    extracted_der = self.__to_decimal__(extracted_data['debt_to_equity_ratio'])
-                    valid_gr = (abs(extracted_gr - extracted_der) < Decimal('0.01')) and (abs(extracted_gr - calculated_gr) < Decimal('0.01'))
-                    if valid_gr:
-                        parsed_data['gearing_ratio'] = extracted_gr
-                
-                # DEBUG. CHECK WHICH KEYS ARE NOT PRESENT
-                for key in ['paid_up_capital', 'financial_report_date', 'turnover', 'net_profit', 'retained_profit', 'net_worth', 'net_current_assets', 'current_ratio', 'gearing_ratio']:
-                    if parsed_data.get(key) is None:
-                        logger.error("Key %s not found in parsed data", key)
-
-                if parsed_data.get('paid_up_capital') is None:
-                    logger.info("Paid up capital not found from table extraction, falling back to image extraction")
-                    shareholders_image_data = self.extract_using_markdown_and_image('financials_and_shareholders')
-                    if shareholders_image_data and shareholders_image_data.get('paid_up_capital') is not None:
-                        parsed_data['paid_up_capital'] = self.__to_decimal__(shareholders_image_data['paid_up_capital'])
-                    else:
-                        logger.error("Paid up capital not found in image extraction")
-
-                if (parsed_data.get('financial_report_date') is None) or (parsed_data.get('turnover') is None) or (parsed_data.get('net_profit') is None) or (parsed_data.get('retained_profit') is None) or (parsed_data.get('net_worth') is None) or (parsed_data.get('net_current_assets') is None) or (parsed_data.get('current_ratio') is None) or (parsed_data.get('gearing_ratio') is None):
-                    logger.info("Financial statements data incomplete from table extraction, falling back to image extraction")
-                    financials_image_data = self.extract_using_markdown_and_image('financial_statements')
-                    logger.info("Financial statements data extracted from image: %s", json.dumps(financials_image_data, indent=2))
-
-                    if financials_image_data:
-                        if parsed_data.get('financial_report_date') is None and financials_image_data.get('financial_year_end') is not None:
-                            parsed_data['financial_report_date'] = financials_image_data['financial_year_end']
-                        
-
-                        if parsed_data.get('turnover') is None and financials_image_data.get('revenue') is not None:
-                            parsed_data['turnover'] = self.__to_decimal__(financials_image_data['revenue'])
-                        
-                        
-                        if parsed_data.get('net_profit') is None and financials_image_data.get('profit_after_tax') is not None:
-                            parsed_data['net_profit'] = self.__to_decimal__(financials_image_data['profit_after_tax'])
-                        
-                        
-                        if parsed_data.get('retained_profit') is None and financials_image_data.get('retained_earning') is not None:
-                            parsed_data['retained_profit'] = self.__to_decimal__(financials_image_data['retained_earning'])
-                        
-                        
-                        if parsed_data.get('net_worth') is None and financials_image_data.get('net_worth') is not None:
-                            parsed_data['net_worth'] = self.__to_decimal__(financials_image_data['net_worth'])
-                        
-                        if parsed_data.get('net_current_assets') is None:
-                            fs_key = ['current_assets', 'current_liabilities', 'non_current_assets', 'total_assets', 'non_current_liabilities', 'long_term_liabilities', 'total_liabilities']
-                            if all(financials_image_data.get(key) is not None for key in fs_key):
-                                nca = self.__to_decimal__(financials_image_data['non_current_assets'])
-                                ca = self.__to_decimal__(financials_image_data['current_assets'])
-                                ta = self.__to_decimal__(financials_image_data['total_assets'])
-                                ncl = self.__to_decimal__(financials_image_data['non_current_liabilities'])
-                                cl = self.__to_decimal__(financials_image_data['current_liabilities'])
-                                ltl = self.__to_decimal__(financials_image_data['long_term_liabilities'])
-                                tl = self.__to_decimal__(financials_image_data['total_liabilities'])
-                                valid_ca_cl = (ta == nca + ca) and (tl == ncl + cl + ltl)
-                                if valid_ca_cl:
-                                    parsed_data['net_current_assets'] = ca - cl
-                                else:
-                                    logger.error("Current assets and liabilities validation failed in image extraction")
-                        
-                        if parsed_data.get('current_ratio') is None and financials_image_data.get('current_ratio') is not None:
-                            extracted_cr = self.__to_decimal__(financials_image_data['current_ratio'])
-                            ca = self.__to_decimal__(financials_image_data['current_assets'])
-                            cl = self.__to_decimal__(financials_image_data['current_liabilities'])
-                            cr = ca / cl if cl > 0 else Decimal(0)
-                            if abs(cr - extracted_cr) < Decimal('0.01'):
-                                parsed_data['current_ratio'] = extracted_cr
-                            else:
-                                logger.error("Current ratio validation failed in image extraction")
-                        
-                        if parsed_data.get('gearing_ratio') is None and financials_image_data.get('gearing_ratio') is not None and financials_image_data.get('net_worth') is not None and financials_image_data.get('total_liabilities') is not None:
-                            tl = self.__to_decimal__(financials_image_data['total_liabilities'])
-                            nw = self.__to_decimal__(financials_image_data['net_worth'])
-                            calculated_gr = tl / nw if nw > 0 else Decimal(0)
-                            extracted_gr = self.__to_decimal__(financials_image_data['gearing_ratio'])
-                            valid_gr = (abs(extracted_gr - calculated_gr) < Decimal('0.01'))
-                            if valid_gr:
-                                parsed_data['gearing_ratio'] = extracted_gr
-                            else:
-                                logger.error("Gearing ratio validation failed in image extraction")
-
-        return parsed_data   
-    
     def __map_parsed_data__(self, parsed_data: Dict):
         """Maps parsed data keys to final output keys."""
         mapped_data = {}
@@ -1459,122 +2373,6 @@ class DocumentDataExtractor:
                     mapped_data['gearing_ratio'] = 'N/A'
             
         return mapped_data
-    
-    def extract_using_markdown(self, prompt: str):
-        """Extract data from markdown generated from Azure Document Intelligence."""
-        markdown = self.result.content
-        if not markdown:
-            return
-        
-        client = self.__get_openai_client__(self.options)
-
-        user_content = [{"type": "text", "text": prompt}, {"type": "text", "text": markdown}]
-
-        completion = client.chat.completions.create(
-            model=self.options.deployment_name,
-            messages=[
-                {"role": "system", "content": self.options.system_prompt},
-                {"role": "user", "content": user_content}
-            ],
-            max_tokens=self.options.max_tokens,
-            temperature=self.options.temperature,
-            top_p=self.options.top_p,
-            logprobs=True,
-            response_format={"type": "json_object"}
-        )
-
-        raw_content = completion.choices[0].message.content
-        
-        try:
-            response_obj_dict = json.loads(raw_content)
-            return response_obj_dict
-        except json.JSONDecodeError:
-            # Fallback in case the model returns invalid JSON 
-            # (Rare with json_object mode, but good practice)
-            return {"error": "Failed to decode JSON", "raw": raw_content}
-
-    def extract_using_markdown_and_image(self, table_tag: str):
-        """Extract data from markdown content and images of document pages where the specified table is located."""
-        markdown = self.result.content
-        if not markdown:
-            return
-        
-        client = self.__get_openai_client__(self.options)
-
-        page_start, page_end = self.__get_page_range_for_table_tag__(table_tag)
-
-        if page_start is None or page_end is None:
-            page_start, page_end = 1, len(self.result.pages)
-
-        image_uris = self.__get_document_image_uris__(
-            self.bytes, page_start, page_end)
-        
-        table_prompt = self.__get_prompt_for_table_tag__(table_tag)
-
-        user_content = [{"type": "text", "text": table_prompt}, {"type": "text", "text": markdown}]
-
-        for image_uri in image_uris:
-            user_content.append({
-                "type": "image_url",
-                "image_url": {
-                    "url": image_uri,
-                    "detail": "high"
-                }
-            })
-
-        completion = client.chat.completions.create(
-            model=self.options.deployment_name,
-            messages=[
-                {"role": "system", "content": self.options.system_prompt},
-                {"role": "user", "content": user_content}
-            ],
-            max_tokens=self.options.max_tokens,
-            temperature=self.options.temperature,
-            top_p=self.options.top_p,
-            logprobs=True,
-            response_format={"type": "json_object"}
-        )
-
-        raw_content = completion.choices[0].message.content
-        
-        try:
-            response_obj_dict = json.loads(raw_content)
-            return response_obj_dict
-        except json.JSONDecodeError:
-            # Fallback in case the model returns invalid JSON 
-            # (Rare with json_object mode, but good practice)
-            return {"error": "Failed to decode JSON", "raw": raw_content}
-        
-        '''
-        completion = client.beta.chat.completions.parse(
-            model=self.options.deployment_name,
-            messages=[
-                {
-                    "role": "system",
-                    "content": self.options.system_prompt,
-                },
-                {
-                    "role": "user",
-                    "content": user_content
-                }
-            ],
-            max_tokens=self.options.max_tokens,
-            temperature=self.options.temperature,
-            top_p=self.options.top_p,
-            # Enabled to determine the confidence of the response.
-            logprobs=True
-        )
-
-        response_obj = completion.choices[0].message.parsed
-        response_obj_dict = response_obj.model_dump()
-
-        confidence_openai = evaluate_confidence_openai(
-            extract_result=response_obj_dict,
-            choice=completion.choices[0]
-        )
-
-        return response_obj_dict
-        '''
 
     def __get_page_range_for_table_tag__(self, table_tag: str) -> Tuple[Optional[int], Optional[int]]:
         """Returns the page range (start, end) for a given table tag."""
@@ -1609,7 +2407,7 @@ class DocumentDataExtractor:
         match table_tag:
             case 'ccris_summary':
                 return (
-                    "Extract the following fields from the table with the heading 'C1: BANKING PAYMENT RECORDS (SOURCE: CCRIS, BANK NEGARA MALAYSIA)'. Under the subheading 'Summary of Potential & Current Liabilities', for the first row labeled 'As Borrower', extract the two values of total outstanding balance and total limit from the columns 'Outstanding' and 'Total Limit'. Do not confuse this with the second row labeled 'As Guarantor'. Do not confuse this with the third row labeled 'Total'. If the value is 0, it may be represented as a dash '-' or an en-dash '–' or an em-dash '—'. If the value is 0.00, return 0.00 and do not return null. Brackets surrounding a numerical value indicates that the numerical value is negative. Extract the value ('Y' or 'N') for the field 'Special Attention Account' which is the last row of the table, under the column 'Outstanding'. If any of these fields are not present in the table, return null for that field. Return the extracted data in the following JSON format: {\"total_outstanding_balance\": value or null, \"total_limit\": value or null, \"special_attention_accounts\": value or null}."
+                    "Extract the following fields from the table with the heading 'C1: BANKING PAYMENT RECORDS (SOURCE: CCRIS, BANK NEGARA MALAYSIA)'. Under the subheading 'Summary of Potential & Current Liabilities', for the first row labeled 'As Borrower', extract the two values of total outstanding balance and total limit from the columns 'Outstanding' and 'Total Limit'. If the value is 0, it may be represented as a dash '-' or an en-dash '–' or an em-dash '—'. If the value is 0.00, return 0.00 not null. Brackets surrounding a numerical value indicates that the numerical value is negative. Extract the value ('Y' or 'N') for the field 'Special Attention Account' which is the last row of the table, under the column 'Outstanding'. If any of these fields are not present in the table, return null for that field. Return the extracted data in the following JSON format: {\"total_outstanding_balance\": value or null, \"total_limit\": value or null, \"special_attention_accounts\": value or null}."
                 )
             case 'ccris_detail':
                 return (
@@ -1760,8 +2558,7 @@ class DocumentDataExtractor:
         non_zeroes = 0
         ones = 0
         twos = 0
-        # TODO check ranges for credit scoring form
-        # This is assuming guarantor will never have >9 months lapses in payments...so must double check with gpt4o
+        # This is assuming guarantor will never have >9 months lapses in payments, hence the gpt4o cross-checks are essential.
         high_non_zeroes = 0
         for string in conduct_values:
             for char in string:
