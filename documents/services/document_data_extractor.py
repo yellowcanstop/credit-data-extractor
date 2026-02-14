@@ -715,12 +715,11 @@ class DocumentDataExtractor:
                 "From the table 'Credit Info at a Glance', extract: "
                 "- 'legal_personal': the number of legal records in past 24 months (personal capacity), from the 'Value' column. "
                 "- 'legal_non_personal': the number of legal records in past 24 months (non-personal capacity), from the 'Value' column. "
-                "- 'special_attention_accounts': the value for 'Special Attention Accounts', from the 'Value' column. "
+                "- 'special_attention_accounts_0': the value for 'Special Attention Accounts', from the 'Value' column. "
                 "From the section 'C1: BANKING PAYMENT RECORDS (SOURCE: CCRIS, BANK NEGARA MALAYSIA)', "
                 "under 'Summary of Potential & Current Liabilities', for the row labeled 'As Borrower': "
                 "- 'total_outstanding_balance': the value under the 'Outstanding' column. "
                 "- 'total_limit': the value under the 'Total Limit' column. "
-                "- 'special_attention_accounts_0': the value ('Y' or 'N') for 'Special Attention Account' from the CCRIS summary. "
                 "- 'special_attention_accounts_1': the value ('Y' or 'N') for 'Special Attention Account' from the CCRIS summary. "
                 "From the 'CCRIS Details' table under 'loan information', extract: "
                 "'ccris_conduct': For each loan row, extract the values (the numeric digits in the monthly columns under the column 'Conduct of Account For Last 12 Months'). There may be multiple loan rows. For each loan row, collect the values into a list of integers. For example, if there are two rows, with the first loan row having all 12 subcolumns populated with the digits shown and the second loan row having only 11 subcolumns populated with the digits shown, then the final ccris_conduct is [[0,0,1,0,0,0,0,0,2,0,0,0], [0,0,1,0,0,0,0,0,2,0,0,0]]. Therefore, if you see a missing month, skip it. Do not represent a missing month with a 0. If you are unsure of the individual digits extracted, then return null for ccris_conduct. Ensure that all loan rows are extracted, with reference to the markdown table. The markdown table may span multiple pages, with each table in between separated by boilerplate text which includes the disclaimer and the slogan 'Knowledge creates confidence'."
@@ -967,7 +966,10 @@ class DocumentDataExtractor:
 
             elif field == 'special_attention_accounts':
                 if self.report_type == ReportType.INDIVIDUAL:
-                    md_val = markdown_result.get('special_attention_accounts')
+                    md_0 = markdown_result.get('special_attention_accounts_0')
+                    md_1 = markdown_result.get('special_attention_accounts_1')
+                    if md_0 is not None and md_1 is not None and md_0[0] == md_1[0]:
+                        md_val = md_0
                 else:
                     md_val = markdown_result.get('special_attention_accounts_entity')
                 if md_val is not None and di_value is not None:
@@ -1112,7 +1114,10 @@ class DocumentDataExtractor:
 
             elif field == 'special_attention_accounts':
                 if self.report_type == ReportType.INDIVIDUAL:
-                    md_val = markdown_result.get('special_attention_accounts')
+                    md_0 = markdown_result.get('special_attention_accounts_0')
+                    md_1 = markdown_result.get('special_attention_accounts_1')
+                    if md_0 is not None and md_1 is not None and md_0[0] == md_1[0]:
+                        md_val = md_0
                 else:
                     md_val = markdown_result.get('special_attention_accounts_entity')
                 if md_val is not None:
