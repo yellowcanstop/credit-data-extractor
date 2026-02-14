@@ -102,6 +102,7 @@ class DocumentDataExtractor:
         self.bytes: bytes = None
         self.table_page_ranges: Dict[str, Tuple[int, int]] = {}
         self.di_confidence: Dict = {}
+        self.di_conduct = None
 
     def __safe_get_cell__(self, table, r_idx: int, c_idx: int) -> Optional[str]:
         """Safely gets and strips a cell value from a table row, returning None if the cell doesn't exist."""
@@ -304,6 +305,9 @@ class DocumentDataExtractor:
             if parsed_data.get(f) != 'N/A'
         }
 
+        # Force additional validation of number of non-zeroes using image + markdown from GPT-4o.
+        fields_needing_fallback_l2.add('repayment_to_banks')
+
         if not fields_needing_fallback_l2:
             logger.info("All fields resolved at Layer 1")
             return parsed_data, flags
@@ -490,6 +494,7 @@ class DocumentDataExtractor:
             # CCRIS conduct from DI
             if extracted_data.get('ccris_conduct'):
                 parsed_data['repayment_to_banks'] = self.__parse_conduct_values__(extracted_data['ccris_conduct'])
+                self.di_conduct = extracted_data['ccris_conduct']
 
             # Utilisation
             util_keys = ['total_outstanding_balance_0', 'total_outstanding_balance_1', 'total_limit_0', 'total_limit_1']
@@ -545,6 +550,7 @@ class DocumentDataExtractor:
                 # CCRIS conduct from DI
                 if extracted_data.get('ccris_conduct'):
                     parsed_data['repayment_to_banks'] = self.__parse_conduct_values__(extracted_data['ccris_conduct'])
+                    self.di_conduct = extracted_data['ccris_conduct']
 
                 # Utilisation
                 if all(extracted_data.get(key) is not None for key in util_keys):
@@ -721,8 +727,6 @@ class DocumentDataExtractor:
                 "- 'total_outstanding_balance': the value under the 'Outstanding' column. "
                 "- 'total_limit': the value under the 'Total Limit' column. "
                 "- 'special_attention_accounts_1': the value ('Y' or 'N') for 'Special Attention Account' from the CCRIS summary. "
-                "From the 'CCRIS Details' table under 'loan information', extract: "
-                "'ccris_conduct': For each loan row, extract the values (the numeric digits in the monthly columns under the column 'Conduct of Account For Last 12 Months'). There may be multiple loan rows. For each loan row, collect the values into a list of integers. For example, if there are two rows, with the first loan row having all 12 subcolumns populated with the digits shown and the second loan row having only 11 subcolumns populated with the digits shown, then the final ccris_conduct is [[0,0,1,0,0,0,0,0,2,0,0,0], [0,0,1,0,0,0,0,0,2,0,0,0]]. Therefore, if you see a missing month, skip it. Do not represent a missing month with a 0. If you are unsure of the individual digits extracted, then return null for ccris_conduct. Ensure that all loan rows are extracted, with reference to the markdown table. The markdown table may span multiple pages, with each table in between separated by boilerplate text which includes the disclaimer and the slogan 'Knowledge creates confidence'."
                 + legal_instructions +
                 trade_ref_instructions +
                 "Return the extracted data in the following JSON format: "
@@ -735,7 +739,6 @@ class DocumentDataExtractor:
                 "\"legal_cases_count\": value or null, "
                 "\"has_trade_reference\": true or false, "
                 "\"trade_reference_count\": value or null, "
-                "\"ccris_conduct\": [list of conduct strings] or null}."
             )
         elif self.report_type == ReportType.COMPANY:
             shareholders_fields = ""
@@ -793,9 +796,7 @@ class DocumentDataExtractor:
                 "under 'Summary of Potential & Current Liabilities', for the row labeled 'As Borrower': "
                 "- 'total_outstanding_balance': the value under the 'Outstanding' column. "
                 "- 'total_limit': the value under the 'Total Limit' column. "
-                "If sections C1: BANKING PAYMENT RECORDS and CCRIS DETAILS are entirely absent or show 'No Information Available', return null for those fields. "
-                "From the 'CCRIS Details' table under 'loan information', extract: "
-                "'ccris_conduct': For each loan row, extract the values (the numeric digits in the monthly columns under the column 'Conduct of Account For Last 12 Months'). There may be multiple loan rows. For each loan row, collect the values into a list of integers. For example, if there are two rows, with the first loan row having all 12 subcolumns populated with the digits shown and the second loan row having only 11 subcolumns populated with the digits shown, then the final ccris_conduct is [[0,0,1,0,0,0,0,0,2,0,0,0], [0,0,1,0,0,0,0,0,2,0,0,0]]. Therefore, if you see a missing month, skip it. Do not represent a missing month with a 0. If you are unsure of the individual digits extracted, then return null for ccris_conduct. Ensure that all loan rows are extracted, with reference to the markdown table. The markdown table may span multiple pages, with each table in between separated by boilerplate text which includes the disclaimer and the slogan 'Knowledge creates confidence'."
+                "If section C1: BANKING PAYMENT RECORDS is entirely absent or show 'No Information Available', return null for those fields. "
                 + legal_instructions +
                 trade_ref_instructions +
                 "Return the extracted data in the following JSON format: "
@@ -811,7 +812,6 @@ class DocumentDataExtractor:
                 "\"legal_cases_count\": value or null, "
                 "\"has_trade_reference\": true or false, "
                 "\"trade_reference_count\": value or null, "
-                "\"ccris_conduct\": [list of conduct strings] or null"
                 + (", \"paid_up_capital\": value or null"
                 ", \"financial_year_end\": value or null"
                 ", \"revenue\": value or null"
@@ -853,7 +853,6 @@ class DocumentDataExtractor:
         if self.report_type == ReportType.INDIVIDUAL:
             field_to_md_keys = {
                 'utilisation': ['total_outstanding_balance', 'total_limit'],
-                'repayment_to_banks': ['ccris_conduct'],
                 'special_attention_accounts': ['special_attention_accounts_0', 'special_attention_accounts_1'],
                 'legal_cases': ['legal_non_personal', 'legal_personal', 'legal_cases_count'],
                 'blacklist': ['has_trade_reference', 'trade_reference_count'],
@@ -861,7 +860,6 @@ class DocumentDataExtractor:
         else:
             field_to_md_keys = {
                 'utilisation': ['total_outstanding_balance', 'total_limit'],
-                'repayment_to_banks': ['ccris_conduct'],
                 'special_attention_accounts': ['special_attention_accounts_entity'],
                 'legal_cases': ['legal_non_personal_entity', 'legal_personal_entity', 'legal_cases_count'],
                 'blacklist': ['has_trade_reference', 'trade_reference_count'],
@@ -1287,6 +1285,7 @@ class DocumentDataExtractor:
             elif tag in ('ccris_detail', 'ccris_detail_edge_case'):
                 if image_result.get('ccris_conduct') is not None:
                     conduct = image_result['ccris_conduct']
+                    di_conduct = extracted_data.get('ccris_conduct')
                     if isinstance(conduct, list) and len(conduct) > 0:
                         # Tally check against md extraction
                         if isinstance(conduct[0], list):
@@ -1294,22 +1293,24 @@ class DocumentDataExtractor:
                             total_zeroes = sum(1 for row in conduct for d in row if d == 0)
                             total_non_zeroes = total_digits - total_zeroes
 
-                            md_conduct = markdown_result.get('ccris_conduct')
-                            if md_conduct and isinstance(md_conduct, list) and len(md_conduct) > 0:
-                                if isinstance(md_conduct[0], list):
-                                    md_digits = sum(len(row) for row in md_conduct)
-                                    md_zeroes = sum(1 for row in md_conduct for d in row if d == 0)
-                                    md_non_zeroes = md_digits - md_zeroes
-                                    if total_digits == md_digits and total_zeroes == md_zeroes and total_non_zeroes == md_non_zeroes:
-                                        logger.info("Layer 2 ccris_conduct tally matches markdown extraction: digits=%d zeroes=%d non_zeroes=%d",
-                                                     total_digits, total_zeroes, total_non_zeroes)
-                                    else:
-                                        logger.warning("Layer 2 ccris_conduct tally MISMATCH: image=%d/%d/%d md=%d/%d/%d",
-                                                       total_digits, total_zeroes, total_non_zeroes,
-                                                       md_digits, md_zeroes, md_non_zeroes)
+                            # Count digits/zeroes/non-zeroes from DI conduct (list of strings)
+                            if isinstance(di_conduct[0], str):
+                                di_digits = sum(len(re.sub(r'[^0-9]', '', s)) for s in di_conduct)
+                                di_zeroes = sum(s.count('0') for s in di_conduct)
+                                di_non_zeroes = di_digits - di_zeroes
+                                
+                                if total_digits == di_digits and total_zeroes == di_zeroes and total_non_zeroes == di_non_zeroes:
+                                    logger.info("Cross-validation ccris_conduct tally matches: digits=%d zeroes=%d non_zeroes=%d",
+                                            total_digits, total_zeroes, total_non_zeroes)
 
-                            if total_digits > 0:
-                                parsed_data['repayment_to_banks'] = self.__parse_conduct_values_image__(conduct)
+                                else:
+                                    logger.warning("Cross-validation ccris_conduct tally MISMATCH: md=%d/%d/%d DI=%d/%d/%d",
+                                                total_digits, total_zeroes, total_non_zeroes,
+                                                di_digits, di_zeroes, di_non_zeroes)
+                                    if total_non_zeroes == di_non_zeroes:
+                                        logger.warning("Despite tally mismatch, non-zero count matches for ccris_conduct, which may be most indicative of repayment behavior.")
+                                    
+                            logger.info("Document Intelligence extraction of CCRIS details prioritized due to lower hallucination risk.")
 
                 if extracted_data.get('total_outstanding_balance_1') is None and image_result.get('total_outstanding_balance') is not None:
                     extracted_data['total_outstanding_balance_1'] = str(image_result['total_outstanding_balance'])
@@ -2472,7 +2473,7 @@ class DocumentDataExtractor:
                     "Extract the following from the CCRIS details table: "
                     "1. 'total_outstanding_balance': The total outstanding balance value from the summary row at the bottom of the table, right before the subheading 'Special Attention Account'. "
                     "2. 'total_limit': The total limit value from the summary row at the bottom of the table, right before the subheading 'Special Attention Account'. "
-                    "3. 'ccris_conduct': For each loan row, extract the values (the numeric digits in the monthly columns under the column 'Conduct of Account For Last 12 Months'). There may be multiple loan rows. For each loan row, collect the values into a list of integers. For example, if there are two rows, with the first loan row having all 12 subcolumns populated with the digits shown and the second loan row having only 11 subcolumns populated with the digits shown, then the final ccris_conduct is [[0,0,1,0,0,0,0,0,2,0,0,0], [0,0,1,0,0,0,0,0,2,0,0,0]]. Therefore, if you see a missing month, skip it. Do not represent a missing month with a 0. A non-zero digit is usually in a shaded or colored cell. A digit which is zero is usually in an unshaded or uncolored cell. If you are unsure of the individual digits extracted, then return null for ccris_conduct. Ensure that all loan rows are extracted, with reference to the markdown table and the images provided."
+                    "3. 'ccris_conduct': For each loan row, extract the values (the numeric digits in the monthly columns under the column 'Conduct of Account For Last 12 Months'). There may be multiple loan rows. For each loan row, collect the values into a list of integers, for example [[0,0,1,0,0,0,0,0,2,0,0,0], [0,0,1,0,0,0,0,0,2,0,0,0]] for two loan rows. A loan row is indicated by an 'O' under the column 'Sts'. Do not represent a missing month with a 0, just skip it. A non-zero digit is usually in a shaded or colored cell. A digit which is zero is usually in an unshaded or uncolored cell. If you are unsure of the individual digits extracted, then return null for ccris_conduct. Ensure that all loan rows are extracted, with reference to the markdown table, the images provided, and this OCR result from another tool (which may contain errors such as 'O' or 'D' for zeroes, so use with caution): {self.di_conduct} ). "
                     "Return the extracted data in the following JSON format: "
                     "{\"total_outstanding_balance\": value or null, \"total_limit\": value or null, \"ccris_conduct\": [list of conduct strings] or null}."
                 )
@@ -2484,7 +2485,7 @@ class DocumentDataExtractor:
                     "Extract the following from the CCRIS details table: "
                     "1. 'total_outstanding_balance': The total outstanding balance value from the summary row at the bottom of the table, right before the subheading 'Special Attention Account'. "
                     "2. 'total_limit': The total limit value from the summary row at the bottom of the table, right before the subheading 'Special Attention Account'. "
-                    "3. 'ccris_conduct': For each loan row, extract the values (the numeric digits in the monthly columns under the column 'Conduct of Account For Last 12 Months'). There may be multiple loan rows. For each loan row, collect the values into a list of integers. For example, if there are two rows, with the first loan row having all 12 subcolumns populated with the digits shown and the second loan row having only 11 subcolumns populated with the digits shown, then the final ccris_conduct is [[0,0,1,0,0,0,0,0,2,0,0,0], [0,0,1,0,0,0,0,0,2,0,0,0]]. Therefore, if you see a missing month, skip it. Do not represent a missing month with a 0. A non-zero digit is usually in a shaded or colored cell. A digit which is zero is usually in an unshaded or uncolored cell. If you are unsure of the individual digits extracted, then return null for ccris_conduct. Ensure that all loan rows are extracted, with reference to the markdown table and the images provided."
+                    "3. 'ccris_conduct': For each loan row, extract the values (the numeric digits in the monthly columns under the column 'Conduct of Account For Last 12 Months'). There may be multiple loan rows. For each loan row, collect the values into a list of integers, for example [[0,0,1,0,0,0,0,0,2,0,0,0], [0,0,1,0,0,0,0,0,2,0,0,0]] for two loan rows. A loan row is indicated by an 'O' under the column 'Sts'. Do not represent a missing month with a 0, just skip it. A non-zero digit is usually in a shaded or colored cell. A digit which is zero is usually in an unshaded or uncolored cell. If you are unsure of the individual digits extracted, then return null for ccris_conduct. Ensure that all loan rows are extracted, with reference to the markdown table, the images provided, and this OCR result from another tool (which may contain errors such as 'O' or 'D' for zeroes, so use with caution): {self.di_conduct} ). "
                     "Return the extracted data in the following JSON format: "
                     "{\"total_outstanding_balance\": value or null, \"total_limit\": value or null, \"ccris_conduct\": [list of conduct strings] or null}."
                 )
