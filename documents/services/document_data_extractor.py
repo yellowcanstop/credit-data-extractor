@@ -18,7 +18,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-LOW_CONFIDENCE_THRESHOLD = 0.8
+LOW_CONFIDENCE_THRESHOLD = 0.7
 
 class ReportType(enum.Enum):
     INDIVIDUAL = "INDIVIDUAL"
@@ -2295,94 +2295,123 @@ class DocumentDataExtractor:
 
             elif key == 'paid_up_capital':
                 # partnership (or non sdn bhd) form does not need paid_up_capital
-                if value < 2:
-                    mapped_data['paid_up_capital'] = '< 2K'
-                elif 2 <= value <= 150999:
-                    mapped_data['paid_up_capital'] = '2K - 150K'
-                elif 151000 <= value <= 300999:
-                    mapped_data['paid_up_capital'] = '151K - 300K'
-                elif 301000 <= value <= 750000:
-                    mapped_data['paid_up_capital'] = '301K - 750K'
+                if value == 'N/A':
+                    mapped_data['paid_up_capital'] = 'N/A'
                 else:
-                    mapped_data['paid_up_capital'] = '> 750K'
+                    value = self.__to_decimal__(value)
+                    if value < 2:
+                        mapped_data['paid_up_capital'] = '< 2K'
+                    elif 2 <= value <= 150999:
+                        mapped_data['paid_up_capital'] = '2K - 150K'
+                    elif 151000 <= value <= 300999:
+                        mapped_data['paid_up_capital'] = '151K - 300K'
+                    elif 301000 <= value <= 750000:
+                        mapped_data['paid_up_capital'] = '301K - 750K'
+                    else:
+                        mapped_data['paid_up_capital'] = '> 750K'
 
             elif key == 'financial_report_date':
                 mapped_data['financial_report_date'] = value
 
             elif key == 'turnover':
-                mapped_data['turnover_amount'] = value
-                if value > 0:
-                    mapped_data['turnover'] = 'Positive'
-                else:
+                if value == 'N/A':
+                    mapped_data['turnover_amount'] = value
                     mapped_data['turnover'] = 'Negative'
+                else:
+                    value = self.__to_decimal__(value)
+                    mapped_data['turnover_amount'] = value
+                    if value > 0:
+                        mapped_data['turnover'] = 'Positive'
+                    else:
+                        mapped_data['turnover'] = 'Negative'
 
             elif key == 'net_profit':
-                mapped_data['net_profit_amount'] = value
                 if value == 'N/A':
+                    mapped_data['net_profit_amount'] = value
                     mapped_data['net_profit'] = 'Negative or N/A ( Make loss company or Not available)'
-                elif value < 0:
-                    mapped_data['net_profit'] = 'Negative or N/A ( Make loss company or Not available)'
-                elif 0 <= value <= 300999:
-                    mapped_data['net_profit'] = '0 - 300K'
-                elif 301000 <= value <= 500999:
-                    mapped_data['net_profit'] = '301K - 500K'
-                elif 501000 <= value <= 999999:
-                    mapped_data['net_profit'] = '501K - 999K'
                 else:
-                    mapped_data['net_profit'] = '> 1 Mil'
+                    value = self.__to_decimal__(value)
+                    mapped_data['net_profit_amount'] = value
+                    if value < 0:
+                        mapped_data['net_profit'] = 'Negative or N/A ( Make loss company or Not available)'
+                    elif 0 <= value <= 300999:
+                        mapped_data['net_profit'] = '0 - 300K'
+                    elif 301000 <= value <= 500999:
+                        mapped_data['net_profit'] = '301K - 500K'
+                    elif 501000 <= value <= 999999:
+                        mapped_data['net_profit'] = '501K - 999K'
+                    else:
+                        mapped_data['net_profit'] = '> 1 Mil'
                 
             elif key == 'retained_profit':
-                mapped_data['retained_profit_amount'] = value
                 if value == 'N/A':
-                    mapped_data['retained_profit'] = 'Negative or N/A ( Making accumulated losses or Not available )'
-                elif value < 0:
+                    mapped_data['retained_profit_amount'] = value
                     mapped_data['retained_profit'] = 'Negative or N/A ( Making accumulated losses or Not available )'
                 else:
-                    mapped_data['retained_profit'] = 'Positive'
+                    value = self.__to_decimal__(value)
+                    mapped_data['retained_profit_amount'] = value
+                    if value < 0:
+                        mapped_data['retained_profit'] = 'Negative or N/A ( Making accumulated losses or Not available )'
+                    else:
+                        mapped_data['retained_profit'] = 'Positive'
 
             elif key == 'net_worth':
-                mapped_data['net_worth_amount'] = value
                 if value == 'N/A':
-                    mapped_data['net_worth'] = 'Negative or N/a ( Is an insolvent company or Not available)'
-                elif value < 0:
+                    mapped_data['net_worth_amount'] = value
                     mapped_data['net_worth'] = 'Negative or N/a ( Is an insolvent company or Not available)'
                 else:
-                    mapped_data['net_worth'] = 'Positive'
+                    value = self.__to_decimal__(value)
+                    mapped_data['net_worth_amount'] = value
+                    if value < 0:
+                        mapped_data['net_worth'] = 'Negative or N/a ( Is an insolvent company or Not available)'
+                    else:
+                        mapped_data['net_worth'] = 'Positive'
 
             elif key == 'net_current_assets':
-                mapped_data['net_current_assets_amount'] = value
                 if value == 'N/A':
-                    mapped_data['net_current_assets'] = '( Negative working capital / Not available )'
-                elif value < 0:
+                    mapped_data['net_current_assets_amount'] = value
                     mapped_data['net_current_assets'] = '( Negative working capital / Not available )'
                 else:
-                    mapped_data['net_current_assets'] = 'Positive'
+                    value = self.__to_decimal__(value)
+                    mapped_data['net_current_assets_amount'] = value
+                    if value < 0:
+                        mapped_data['net_current_assets'] = '( Negative working capital / Not available )'
+                    else:
+                        mapped_data['net_current_assets'] = 'Positive'
 
             elif key == 'current_ratio':
-                if value < 1:
-                    mapped_data['current_ratio'] = '< 1.00'
-                elif 1 <= value <= 1.99:
-                    mapped_data['current_ratio'] = '1.01 - 1.99'
-                elif value >= 2:
-                    mapped_data['current_ratio'] = '> 2.00'
-                else:
+                if value == 'N/A':
                     mapped_data['current_ratio'] = 'N/A'
+                else:
+                    value = self.__to_decimal__(value)
+                    if value < 1:
+                        mapped_data['current_ratio'] = '< 1.00'
+                    elif 1 <= value <= Decimal('1.99'):
+                        mapped_data['current_ratio'] = '1.01 - 1.99'
+                    elif value >= 2:
+                        mapped_data['current_ratio'] = '> 2.00'
+                    else:
+                        mapped_data['current_ratio'] = 'N/A'
                 
             elif key == 'gearing_ratio':
-                if value < 0:
-                    mapped_data['gearing_ratio'] = 'Negative'
-                elif 0 <= value <= 0.99:
-                    mapped_data['gearing_ratio'] = '( 0 - 0.99 )'
-                elif 1 <= value <= 1.99:
-                    mapped_data['gearing_ratio'] = '( 1.00 - 1.99 )'
-                elif 2 <= value <= 2.99:
-                    mapped_data['gearing_ratio'] = '( 2.00 - 2.99 )'
-                elif 3 <= value <= 3.99:
-                    mapped_data['gearing_ratio'] = '( 3.00 - 3.99 )'
-                elif value >= 4:
-                    mapped_data['gearing_ratio'] = '> 4.00'
-                else:
+                if value == 'N/A':
                     mapped_data['gearing_ratio'] = 'N/A'
+                else:
+                    value = self.__to_decimal__(value)
+                    if value < 0:
+                        mapped_data['gearing_ratio'] = 'Negative'
+                    elif 0 <= value <= Decimal('0.99'):
+                        mapped_data['gearing_ratio'] = '( 0 - 0.99 )'
+                    elif 1 <= value <= Decimal('1.99'):
+                        mapped_data['gearing_ratio'] = '( 1.00 - 1.99 )'
+                    elif 2 <= value <= Decimal('2.99'):
+                        mapped_data['gearing_ratio'] = '( 2.00 - 2.99 )'
+                    elif 3 <= value <= Decimal('3.99'):
+                        mapped_data['gearing_ratio'] = '( 3.00 - 3.99 )'
+                    elif value >= 4:
+                        mapped_data['gearing_ratio'] = '> 4.00'
+                    else:
+                        mapped_data['gearing_ratio'] = 'N/A'
             
         return mapped_data
 
