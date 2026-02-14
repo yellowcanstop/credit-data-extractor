@@ -178,6 +178,8 @@ class DocumentDataExtractor:
     
     def __to_decimal__(self, value) -> Decimal:
         """Converts a value to Decimal. Skips string normalization if value is already numeric."""
+        if isinstance(value, Decimal):
+            return value
         if isinstance(value, (int, float)):
             return Decimal(str(value))
         return self.__str_to_decimal__(self.__normalize_numeric_str__(value))
@@ -2228,26 +2230,31 @@ class DocumentDataExtractor:
                     mapped_data['repayment_to_banks'] = value
 
             elif key == 'utilisation':
-                if value == 0:
-                    if self.report_type == ReportType.INDIVIDUAL:
-                        mapped_data['utilisation'] = '0%'
-                    else:
-                        mapped_data['utilisation'] = '0% ( No outstanding balance )'
-                elif 1 <= value <= 25:
-                    mapped_data['utilisation'] = '( 1% - 25% )'
-                elif 26 <= value <= 50:
-                    mapped_data['utilisation'] = '( 26% - 50% )'
-                elif 51 <= value <= 75:
-                    mapped_data['utilisation'] = '( 51% - 75% )'
-                elif 76 <= value <= 100:
-                    mapped_data['utilisation'] = '( 76% - 100% )'
-                else:
+                if value == 'N/A':
                     mapped_data['utilisation'] = 'N/A'
+                else:
+                    value = self.__to_decimal__(value)
+                    if value == 0:
+                        if self.report_type == ReportType.INDIVIDUAL:
+                            mapped_data['utilisation'] = '0%'
+                        else:
+                            mapped_data['utilisation'] = '0% ( No outstanding balance )'
+                    elif 1 <= value <= 25:
+                        mapped_data['utilisation'] = '( 1% - 25% )'
+                    elif 26 <= value <= 50:
+                        mapped_data['utilisation'] = '( 26% - 50% )'
+                    elif 51 <= value <= 75:
+                        mapped_data['utilisation'] = '( 51% - 75% )'
+                    elif 76 <= value <= 100:
+                        mapped_data['utilisation'] = '( 76% - 100% )'
+                    else:
+                        mapped_data['utilisation'] = 'N/A'
 
             elif key == 'special_attention_accounts':
                 mapped_data['special_attention_accounts'] = value
 
             elif key == 'legal_cases':
+                value = int(value)
                 if value == 0:
                     mapped_data['legal_cases'] = '0 ( Clean of legal action )'
                 elif value == 1:
@@ -2260,6 +2267,7 @@ class DocumentDataExtractor:
                     mapped_data['legal_cases'] = '>3 ( More than 3 cases still on-going or unsettled )'
 
             elif key == 'blacklist':
+                value = int(value)
                 if value == 0:
                     mapped_data['blacklist_cases'] = '0 ( no blacklist issue )'
                 elif value == 1:
@@ -2272,6 +2280,7 @@ class DocumentDataExtractor:
                     mapped_data['blacklist_cases'] = '>3 ( More than 3 blacklist issue )'
                     
             elif key == 'years_in_business':
+                value = int(value)
                 if value < 2:
                     mapped_data['years_in_business'] = '< 2 Years'
                 elif 2 <= value <= 5:
