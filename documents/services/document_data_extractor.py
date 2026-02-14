@@ -1233,6 +1233,8 @@ class DocumentDataExtractor:
             'net_current_assets': ['financial_statements'],
             'current_ratio': ['financial_statements'],
             'gearing_ratio': ['financial_statements'],
+            'blacklist': ['trade_reference'],
+            'number_of_directors_or_partners': ['directors_officers', 'business_profile'],
         }
 
         # Collect unique tags to avoid duplicate API calls
@@ -1539,15 +1541,19 @@ class DocumentDataExtractor:
             idx_and_type = self.__determine_table_type__(table, preceding_text, table_idx)
 
             if len(idx_and_type) == 1:
-                if idx_and_type[0]['type'] != 'UNKNOWN':
-                    lookup_table = self.__convert_to_row_map__(table)   
-                    logger.info("Tagged table index %d as type %s", idx_and_type[0]['idx'], idx_and_type[0]['type'])
-                    tagged_tables.append({
-                        'type': idx_and_type[0]['type'],
-                        'table': lookup_table,
-                        'raw_table': table
-                    })
-                    self.__record_table_pages__(idx_and_type[0]['idx'], idx_and_type[0]['type'])
+                tag_type = idx_and_type[0]['type']
+                if tag_type == 'UNKNOWN':
+                    continue
+
+                lookup_table = self.__convert_to_row_map__(table)   
+                logger.info("Tagged table index %d as type %s", idx_and_type[0]['idx'], tag_type)
+                consumed_indices.add(idx_and_type[0]['idx'])
+                tagged_tables.append({
+                    'type': tag_type,
+                    'table': lookup_table,
+                    'raw_table': table
+                })
+                self.__record_table_pages__(idx_and_type[0]['idx'], tag_type)
             elif len(idx_and_type) > 1:
                 # multi-page CCRIS Details tables identified
                 for item in idx_and_type:
@@ -1559,6 +1565,8 @@ class DocumentDataExtractor:
                         'raw_table': self.result.tables[item['idx']]
                     })
                     self.__record_table_pages__(item['idx'], item['type'])
+                    consumed_indices.add(item['idx'])
+
         logger.info("Tagged %d tables after processing", len(tagged_tables))
         return tagged_tables
 
@@ -2442,7 +2450,15 @@ class DocumentDataExtractor:
             'snapshot': ['SNAPSHOT'],
             'financials_and_shareholders': ['FINANCIALS_AND_SHAREHOLDERS'],
             'financial_statements': ['FINANCIAL_STATEMENTS'],
+            'directors_officers': ['DIRECTORS_OFFICERS'],
+            'business_profile': ['BUSINESS_PROFILE'],
+            'trade_reference': ['TRADE_REFERENCE']
         }
+
+        if table_tag == 'ccris_detail' or table_tag == 'ccris_detail_edge_case' or table_tag == 'trade_reference':
+            min_page = self.table_page_ranges.get('CCRIS_SUMMARY', (0, len(self.result.pages)))[0]
+            max_page = len(self.result.pages)
+            return (min_page, max_page)
         
         types = tag_to_types.get(table_tag, [])
         min_page, max_page = None, None
@@ -2452,16 +2468,35 @@ class DocumentDataExtractor:
                 t_min, t_max = self.table_page_ranges[t]
                 min_page = t_min if min_page is None else min(min_page, t_min)
                 max_page = t_max if max_page is None else max(max_page, t_max)
-        
-        # Edge case: CCRIS_DETAILS_SINGLE may actually be a multi-page table where the number of columns parsed for the first part of the table and subsequent parts are different. Since __detect_ccris_details_tables__ relies on column_count, it gets tagged as SINGLE. A future fix would be to detect the boilerplate between multi-page tables, or parsing the markdown, for a more robust detect method. To handle this case, we extend the end page to the end of the document so the LLM can find the rest of the table.
-        if table_tag == 'ccris_detail_edge_case':
-            max_page = len(self.result.pages)
 
         return (min_page, max_page)
             
     def __get_prompt_for_table_tag__(self, table_tag: str) -> str:
         """Returns the prompt string for a given table tag."""
         match table_tag:
+            case 'trade_reference':
+                return (
+                    "For the section 'E2: TRADE REFERENCE', "
+                    "check if there is 'No Information Available' below the section heading. "
+                    "If 'No Information Available' appears, return false for 'has_trade_reference'. "
+                    "If there are tables under this section with subheadings like 'The following information are in relation to Account No' "
+                    "or 'Aging Information', return true for 'has_trade_reference' and count the number of distinct trade reference entries "
+                    "in the summary table as 'trade_reference_count'. "
+                )
+            case 'directors_officers':
+                if self.relevant_values.get('partnership') is None:
+                    return (
+                        "Extract the number of directors from the table with the heading 'DIRECTORS / OFFICERS'. The column 'Designation' indicates the status for each row, where 'DS' indicates a director. Count the number of occurrences of 'DS' in the 'Designation' column to determine the number of directors. If there are no directors listed, return 0. Return the extracted data in the following JSON format: {\"director_count\": value}."
+                    )
+                else:
+                    return ("") 
+            case 'business_profile':
+                if self.relevant_values.get('partnership') is not None:
+                    return (
+                        "Extract the number of partners from the table with the heading 'B1: BUSINESS PROFILE'. The table shows the personal details such as name, id, status, position for each partner or owner. The row 'Position' indicates the position of the individual, where 'Partner' indicates a partner. If there are no partners listed, return 0. Return the extracted data in the following JSON format: {\"partner_count\": value}."
+                    )
+                else:
+                    return ("")
             case 'ccris_summary':
                 return (
                     "Extract the following fields from the table with the heading 'C1: BANKING PAYMENT RECORDS (SOURCE: CCRIS, BANK NEGARA MALAYSIA)'. Under the subheading 'Summary of Potential & Current Liabilities', for the first row labeled 'As Borrower', extract the two values of total outstanding balance and total limit from the columns 'Outstanding' and 'Total Limit'. If the value is 0, it may be represented as a dash '-' or an en-dash '–' or an em-dash '—'. If the value is 0.00, return 0.00 not null. Brackets surrounding a numerical value indicates that the numerical value is negative. Extract the value ('Y' or 'N') for the field 'Special Attention Account' which is the last row of the table, under the column 'Outstanding'. If any of these fields are not present in the table, return null for that field. Return the extracted data in the following JSON format: {\"total_outstanding_balance\": value or null, \"total_limit\": value or null, \"special_attention_accounts\": value or null}."
