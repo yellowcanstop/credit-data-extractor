@@ -101,7 +101,13 @@ def evaluate_confidence(
                 for item in value
             ]
         else:
-            value_str = str(value)
+            # Handle booleans/None between Python and JSON
+            if isinstance(value, bool):
+                value_str = "true" if value else "false"
+            elif value is None:
+                value_str = "null"
+            else:
+                value_str = str(value)
 
             try:
                 # Find the start index of the value in the generated text
