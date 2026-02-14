@@ -1514,8 +1514,13 @@ class DocumentDataExtractor:
         
         logger.info("Processing %d tables for tagging", len(self.result.tables))
         paragraphs = self.result.paragraphs or []
+
+        consumed_indices = set()
         
         for table_idx, table in enumerate(self.result.tables):
+            if table_idx in consumed_indices: 
+                continue
+
             table_region = table.bounding_regions[0] if table.bounding_regions else None
             
             # Find preceding paragraph to use as context
@@ -1620,7 +1625,13 @@ class DocumentDataExtractor:
                 headers.append(cell.content.strip().lower())
         header_text = ' '.join(headers)
 
-        if self.__is_fuzzy_match__(header_text, 'c1: banking payment records (source: ccris, bank negara malaysia)' or self.__is_fuzzy_match__(header_text, 'ccris entity key') or self.__is_fuzzy_match__(header_text, 'ccris summary') or self.__is_fuzzy_match__(header_text, 'credit applications') or self.__is_fuzzy_match__(header_text, 'approved in past 12 months') or self.__is_fuzzy_match__(header_text, 'summary of potential & current liabilities') or self.__is_fuzzy_match__(header_text, 'as borrower')):
+        if (self.__is_fuzzy_match__(header_text, 'c1: banking payment records (source: ccris, bank negara malaysia)')
+        or self.__is_fuzzy_match__(header_text, 'ccris entity key')
+        or self.__is_fuzzy_match__(header_text, 'ccris summary')
+        or self.__is_fuzzy_match__(header_text, 'credit applications')
+        or self.__is_fuzzy_match__(header_text, 'approved in past 12 months')
+        or self.__is_fuzzy_match__(header_text, 'summary of potential & current liabilities')
+        or self.__is_fuzzy_match__(header_text, 'as borrower')):
             return [{'idx': table_idx, 'type': 'CCRIS_SUMMARY'}]
             
         if self.__is_fuzzy_match__(header_text, 'ccris details)') or self.__is_fuzzy_match__(header_text, 'loan information') or self.__is_fuzzy_match__(header_text, 'outstanding credit') or (self.__is_fuzzy_match__(header_text, 'no') and (table.column_count == 25 or table.column_count == 14)):
@@ -1661,6 +1672,7 @@ class DocumentDataExtractor:
                 return [{'idx': table_idx, 'type': 'BUSINESS_PROFILE'}]
             
             if (self.__is_fuzzy_match__(header_text, 'financial highlights') or self.__is_fuzzy_match__(header_text, 'financial year end') or self.__is_fuzzy_match__(header_text, 'date of tabling') or self.__is_fuzzy_match__(header_text, 'balance sheet') or self.__is_fuzzy_match__(header_text, 'non-current assets') or self.__is_fuzzy_match__(header_text, 'income statement') or self.__is_fuzzy_match__(header_text, 'revenue') or self.__is_fuzzy_match__(header_text, 'liquidity ratios') or self.__is_fuzzy_match__(header_text, 'current ratio')) and table.column_count == 6:
+                self.relevant_values['financial_statements'] = True
                 return [{'idx': table_idx, 'type': 'FINANCIAL_STATEMENTS'}]
 
         # Second try: Use preceding paragraph
