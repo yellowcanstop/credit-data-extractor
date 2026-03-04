@@ -20,7 +20,7 @@ register_documents(app)
 register_reports(app)
 
 @app.route(route="upload", methods=["POST"])
-async def upload_leads(req: func.HttpRequest):
+async def upload_reports(req: func.HttpRequest):
     logger.info("Processing bulk file upload...")
 
     container_name = req.form.get('container_name')

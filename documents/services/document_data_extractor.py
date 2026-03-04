@@ -1289,7 +1289,7 @@ class DocumentDataExtractor:
                 if image_result.get('ccris_conduct') is not None:
                     conduct = image_result['ccris_conduct']
                     di_conduct = extracted_data.get('ccris_conduct')
-                    if isinstance(conduct, list) and len(conduct) > 0:
+                    if isinstance(conduct, list) and len(conduct) > 0 and di_conduct is not None:
                         # Tally check against md extraction
                         if isinstance(conduct[0], list):
                             total_digits = sum(len(row) for row in conduct)
@@ -1297,7 +1297,7 @@ class DocumentDataExtractor:
                             total_non_zeroes = total_digits - total_zeroes
 
                             # Count digits/zeroes/non-zeroes from DI conduct (list of strings)
-                            if isinstance(di_conduct[0], str):
+                            if isinstance(di_conduct, list) and len(di_conduct) > 0 and isinstance(di_conduct[0], str):
                                 di_digits = sum(len(re.sub(r'[^0-9]', '', s)) for s in di_conduct)
                                 di_zeroes = sum(s.count('0') for s in di_conduct)
                                 di_non_zeroes = di_digits - di_zeroes
