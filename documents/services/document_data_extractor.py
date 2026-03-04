@@ -2229,6 +2229,8 @@ class DocumentDataExtractor:
     def __map_parsed_data__(self, parsed_data: Dict):
         """Maps parsed data keys to final output keys."""
         mapped_data = {}
+
+        mapped_data['report_type'] = self.report_type.value
         
         if self.relevant_values.get('financial_statements') is not None and self.relevant_values.get('financial_statements') == True:
             mapped_data['financial_report_provided'] = 'YES'
