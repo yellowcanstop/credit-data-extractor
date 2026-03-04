@@ -2481,7 +2481,7 @@ class DocumentDataExtractor:
                     "If 'No Information Available' appears, return false for 'has_trade_reference'. "
                     "If there are tables under this section with subheadings like 'The following information are in relation to Account No' "
                     "or 'Aging Information', return true for 'has_trade_reference' and count the number of distinct trade reference entries "
-                    "in the summary table as 'trade_reference_count'. "
+                    "in the summary table as 'trade_reference_count'. Return the extracted data in the following JSON format: {\"has_trade_reference\": value, \"trade_reference_count\": value}."
                 )
             case 'directors_officers':
                 if self.relevant_values.get('partnership') is None:
