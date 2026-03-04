@@ -2,13 +2,24 @@ from __future__ import annotations
 from pydantic import Field
 from shared.workflows.validation_result import ValidationResult
 import logging
+from typing import Any
 
 
 class WorkflowResult(ValidationResult):
-    """Defines the result of a workflow operation (orchestration or activity), containing a list of activity results in addition to the validation messages."""
+    """Defines the result of a workflow operation (orchestration or activity), containing a list of activity results in addition to the validation messages, and the payload."""
+
+    status: str = Field(
+        default="pending",
+        description='The status of the workflow operation, e.g. "Success" or "Failed".'
+    )
 
     name: str = Field(
         description='The name of the workflow operation.'
+    )
+
+    data: Any = Field(
+        default=None, 
+        description='The actual payload/data returned by the operation.'
     )
 
     activity_results: list[WorkflowResult] = Field(

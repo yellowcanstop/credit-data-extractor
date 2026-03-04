@@ -33,23 +33,22 @@ def run(context: df.DurableOrchestrationContext):
 
     # Step 3: Process each file
     for document in input.document_file_names:
-        extracted_data = yield context.call_activity(
+        raw_extracted_data = yield context.call_activity(
             extract_data.name,
             extract_data.Request(
                 container_name=input.container_name,
                 blob_name=document))
 
-        if extracted_data is None:
-            result.add_error(
-                extract_data.name,
-                f"Failed to extract data for {document}.")
+        item_result = WorkflowResult(name=f"Extract-{document}")
+
+        if not raw_extracted_data:
+            item_result.add_error(extract_data.name, "No data extracted.")
+            result.add_activity_result(extract_data.name, f"Failed: {document}", item_result)
             continue
         
-        if not extracted_data:
-            result.add_error(
-                extract_data.name,
-                f"No data extracted for {document} (Empty result)."
-            )
-            continue
+        item_result.data = raw_extracted_data
+        item_result.add_message(extract_data.name, "Data successfully extracted.")
+
+        result.add_activity_result(extract_data.name, f"Processed {document}", item_result)
     
     return result.model_dump()

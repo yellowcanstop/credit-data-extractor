@@ -52,11 +52,23 @@ def run(context: df.DurableOrchestrationContext):
     input: DocumentBatchRequest = context.get_input()
     result = WorkflowResult(name=name)
 
+    context.set_custom_status({
+        "phase": "Validating Input...",
+        "progress": 5,
+        "processed_count": 0,
+        "total_count": 0
+    })
+
     # Step 2: Validate the input
     validation_result = input.validate()
     if not validation_result.is_valid:
         result.merge(validation_result)
         return result
+
+    context.set_custom_status({
+        "phase": "Fetching Folders...",
+        "progress": 10
+    })
 
     result.add_message("DocumentBatchRequest.validate", "input is valid")
 
@@ -65,6 +77,18 @@ def run(context: df.DurableOrchestrationContext):
 
     result.add_message(get_document_folders.name,
                        f"Retrieved {len(document_folders.folders)} document folders.")
+
+    total_folders = len(document_folders.folders)
+
+    context.set_custom_status({
+        "phase": "Data Extractor Running...",
+        "progress": 20,
+        "processed_count": 0,
+        "total_count": total_folders,
+        "batch_number": 1, # to remove
+        "total_batches": 1, # to remove
+        "processing_range": f"1-{total_folders}"
+    })
 
     # Step 4: Process the documents in each folder.
     process_document_tasks: list[TaskBase] = []
@@ -75,10 +99,26 @@ def run(context: df.DurableOrchestrationContext):
 
     yield context.task_all(process_document_tasks)
 
+    context.set_custom_status({
+        "phase": "Finalizing Results...",
+        "progress": 95,
+        "processed_count": total_folders,
+        "total_count": total_folders
+    })
+
     for task in process_document_tasks:
         task_result = WorkflowResult.model_validate(task.result)
         result.add_activity_result(process_document_workflow.name,
                                    "Processed document folder.",
                                    task_result)
+    
+    context.set_custom_status({
+        "phase": "Successfully completed!",
+        "progress": 100,
+        "processed_count": total_folders,
+        "total_count": total_folders
+    })
+
+    result.status = "complete"
 
     return result.model_dump()
