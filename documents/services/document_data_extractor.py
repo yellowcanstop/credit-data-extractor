@@ -2360,14 +2360,8 @@ class DocumentDataExtractor:
                     mapped_data['net_profit_amount'] = value
                     if value < 0:
                         mapped_data['net_profit'] = 'Negative or N/A ( Make loss company or Not available)'
-                    elif 0 <= value <= 300999:
-                        mapped_data['net_profit'] = '0 - 300K'
-                    elif 301000 <= value <= 500999:
-                        mapped_data['net_profit'] = '301K - 500K'
-                    elif 501000 <= value <= 999999:
-                        mapped_data['net_profit'] = '501K - 999K'
                     else:
-                        mapped_data['net_profit'] = '> 1 Mil'
+                        mapped_data['net_profit'] = 'Positive'
                 
             elif key == 'retained_profit':
                 if value == 'N/A':
@@ -2407,18 +2401,15 @@ class DocumentDataExtractor:
 
             elif key == 'current_ratio':
                 if value == 'N/A':
-                    mapped_data['current_ratio'] = 'N/A'
+                    mapped_data['current_ratio'] = '< 1.00 or N/A'
                 else:
                     value = self.__to_decimal__(value)
                     if value < 1:
-                        mapped_data['current_ratio'] = '< 1.00'
-                    elif 1 <= value <= Decimal('1.99'):
-                        mapped_data['current_ratio'] = '1.01 - 1.99'
-                    elif value >= 2:
-                        mapped_data['current_ratio'] = '> 2.00'
+                        mapped_data['current_ratio'] = '< 1.00 or N/A'
+                    elif value == 1:
+                        mapped_data['current_ratio'] = '1.00'
                     else:
-                        mapped_data['current_ratio'] = 'N/A'
-                
+                        mapped_data['current_ratio'] = '> 2.00'                
             elif key == 'gearing_ratio':
                 if value == 'N/A':
                     mapped_data['gearing_ratio'] = 'N/A'
