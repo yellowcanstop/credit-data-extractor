@@ -157,25 +157,39 @@ class DocumentDataExtractor:
 
             logger.info("Document Intelligence confidence evaluation: %s", confidence_di)
 
-            parsed_data, flags = self.__run_extraction_pipeline__(extracted_data, confidence_di)
+            parsed_data, flags, metadata = self.__run_extraction_pipeline__(extracted_data, confidence_di)
             logger.info("Parsed extracted data: %s", parsed_data)
 
             mapped_data = self.__map_parsed_data__(parsed_data)
-            mapped_data['_flags'] = flags
+
+            final_result = {
+                "mapped_data": self.__serialize_decimals__(mapped_data),
+                "intermediate_data": self.__serialize_decimals__(parsed_data), # Cleaned but not mapped
+                "traceability": {
+                    "confidence": metadata["confidence_scores"],
+                    "layer2_triggers": metadata["layer2_fallback_fields"],
+                    "validation_failures": metadata["validation_results"],
+                    "flags": flags
+                }
+            }
+
             logger.info("Completed extraction successfully")
 
         except Exception as e:
             logger.error("Extraction failed: %s", e, exc_info=True)
             raise
-        
-        # Convert Decimal values to float for JSON serialization
-        result = {}
-        for k, v in mapped_data.items():
-            if isinstance(v, Decimal):
-                result[k] = float(v)
-            else:
-                result[k] = v
-        return result
+    
+        return final_result
+
+    def __serialize_decimals__(self, obj):
+        """Recursively convert Decimals to floats for JSON."""
+        if isinstance(obj, dict):
+            return {k: self.__serialize_decimals__(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self.__serialize_decimals__(v) for v in obj]
+        elif isinstance(obj, Decimal):
+            return float(obj)
+        return obj
     
     def __to_decimal__(self, value) -> Decimal:
         """Converts a value to Decimal. Skips string normalization if value is already numeric."""
@@ -247,12 +261,18 @@ class DocumentDataExtractor:
           Layer 1: Markdown-only extraction for essential cross-checking with layer 0.
           Layer 2: Selective fallback using Markdown + Image.
 
-        Returns (parsed_data, flags) where flags contains missing/low-confidence info.
+        Returns (parsed_data, flags, metadata) where flags contains missing/low-confidence info.
         """
         flags: Dict[str, List[str]] = {
             'missing': [],
             'low_confidence': [],
             'validation_failed': [],
+        }
+
+        metadata = {
+            "confidence_scores": {"layer0": confidence_di, "layer1": {}, "layer2": {}},
+            "layer2_fallback_fields": [],
+            "validation_results": {}
         }
 
         # ---- Layer 0: Parse DI data and validate ----
@@ -276,6 +296,7 @@ class DocumentDataExtractor:
                 extract_result=markdown_result,
                 choice=markdown_choice
             )
+            metadata['confidence_scores']['layer1'] = confidence_l1
             logger.info("Layer 1 OpenAI confidence: %s", confidence_l1)
 
             # Compare markdown results with DI results for all fields.
@@ -315,10 +336,16 @@ class DocumentDataExtractor:
 
         # ---- Layer 2: Markdown + Image fallback ----
         logger.info("=== Layer 2: Markdown + Image fallback for fields: %s ===", fields_needing_fallback_l2)
-        self.__run_layer2_image_fallback__(extracted_data, parsed_data, fields_needing_fallback_l2, markdown_result)
+
+        metadata["layer2_fallback_fields"] = list(fields_needing_fallback_l2)
+        
+        if fields_needing_fallback_l2:
+            confidence_l2 = self.__run_layer2_image_fallback__(extracted_data, parsed_data, fields_needing_fallback_l2, markdown_result)
+            metadata['confidence_scores']['layer2'] = confidence_l2
 
         # Final validation
         validation_l2 = self.__validate_parsed_data__(parsed_data, extracted_data)
+        metadata['validation_results'] = validation_l2
         required_fields = self.__get_required_fields__()
 
         # Build final flags
@@ -351,7 +378,7 @@ class DocumentDataExtractor:
         if flags['validation_failed']:
             logger.warning("FINAL - Validation failed fields: %s", flags['validation_failed'])
 
-        return parsed_data, flags
+        return parsed_data, flags, metadata
     
     def __get_field_confidence__(self, field: str, confidence: Dict) -> Optional[float]:
         """Extracts the confidence score for a field from a confidence dict, e.g. nested {'confidence': float, 'value': ...} or just {'confidence': float}."""
@@ -1253,6 +1280,7 @@ class DocumentDataExtractor:
 
         logger.info("Layer 2 image tags to call: %s", tags_to_call)
 
+        overall_confidence_l2 = {}
         # Execute each image extraction and merge results
         for tag in tags_to_call:
             try:
@@ -1273,6 +1301,7 @@ class DocumentDataExtractor:
                     choice=image_choice
                 )
                 logger.info("Layer 2 confidence for tag '%s': %s", tag, confidence_l2)
+                overall_confidence_l2[tag] = confidence_l2
 
             # Merge based on tag
             if tag == 'ccris_summary':
@@ -1417,7 +1446,8 @@ class DocumentDataExtractor:
                         calc_gr = tl / nw if nw > 0 else Decimal(0)
                         if abs(extracted_gr - calc_gr) < Decimal('0.01'):
                             parsed_data['gearing_ratio'] = extracted_gr
-
+        return overall_confidence_l2
+    
     def extract_using_markdown_with_confidence(self, prompt: str) -> Tuple[Optional[Dict], Optional[Any]]:
         """Extract data from markdown and return (result_dict, choice) for confidence evaluation."""
         markdown = self.result.content

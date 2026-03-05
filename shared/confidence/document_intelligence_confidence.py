@@ -166,7 +166,7 @@ def extract_lines(
     """
 
     di_lines = list()
-    for page_number, page in enumerate(analyze_result.pages):
+    for page_number, page in enumerate(analyze_result.pages, 1):
         for line in page.lines:
             line_copy = copy.copy(line)
             contained_words = list()
