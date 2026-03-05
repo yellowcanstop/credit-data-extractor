@@ -499,16 +499,13 @@ class DocumentDataExtractor:
                         failures['current_ratio'] = f'current_ratio {extracted_cr} != calculated {cr}'
 
             # Gearing ratio validation
-            if all(extracted_data.get(k) is not None for k in ['gearing_ratio', 'debt_to_equity_ratio', 'net_worth', 'total_liabilities']):
+            if all(extracted_data.get(k) is not None for k in ['gearing_ratio', 'net_worth', 'total_liabilities']):
                 tl = self.__to_decimal__(extracted_data['total_liabilities'])
                 nw = self.__to_decimal__(extracted_data['net_worth'])
                 extracted_gr = self.__to_decimal__(extracted_data['gearing_ratio'])
-                extracted_der = self.__to_decimal__(extracted_data['debt_to_equity_ratio'])
                 if nw > 0:
                     calc_gr = tl / nw
-                    if abs(extracted_gr - extracted_der) >= Decimal('0.01'):
-                        failures['gearing_ratio'] = 'gearing_ratio and debt_to_equity_ratio mismatch'
-                    elif abs(extracted_gr - calc_gr) >= Decimal('0.01'):
+                    if abs(extracted_gr - calc_gr) >= Decimal('0.01'):
                         failures['gearing_ratio'] = f'gearing_ratio {extracted_gr} != calculated {calc_gr}'
 
         return failures
@@ -696,14 +693,13 @@ class DocumentDataExtractor:
                                 parsed_data['current_ratio'] = extracted_cr
 
                 # Gearing ratio
-                bal_keys = ['gearing_ratio', 'debt_to_equity_ratio', 'net_worth', 'total_liabilities']
+                bal_keys = ['gearing_ratio', 'net_worth', 'total_liabilities']
                 if all(extracted_data.get(key) is not None for key in bal_keys):
                     tl = self.__to_decimal__(extracted_data['total_liabilities'])
                     nw = self.__to_decimal__(extracted_data['net_worth'])
                     calculated_gr = tl / nw if nw > 0 else Decimal(0)
                     extracted_gr = self.__to_decimal__(extracted_data['gearing_ratio'])
-                    extracted_der = self.__to_decimal__(extracted_data['debt_to_equity_ratio'])
-                    valid_gr = (abs(extracted_gr - extracted_der) < Decimal('0.01')) and (abs(extracted_gr - calculated_gr) < Decimal('0.01'))
+                    valid_gr = (abs(extracted_gr - calculated_gr) < Decimal('0.01'))
                     if valid_gr:
                         parsed_data['gearing_ratio'] = extracted_gr
 
