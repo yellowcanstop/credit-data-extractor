@@ -54,7 +54,7 @@ def run(context: df.DurableOrchestrationContext):
 
     context.set_custom_status({
         "phase": "Validating Input...",
-        "progress": 5,
+        "progress": 3,
         "processed_count": 0,
         "total_count": 0
     })
@@ -67,7 +67,7 @@ def run(context: df.DurableOrchestrationContext):
 
     context.set_custom_status({
         "phase": "Fetching Folders...",
-        "progress": 10
+        "progress": 5
     })
 
     result.add_message("DocumentBatchRequest.validate", "input is valid")
@@ -82,7 +82,7 @@ def run(context: df.DurableOrchestrationContext):
 
     context.set_custom_status({
         "phase": "Data Extractor Running...",
-        "progress": 20,
+        "progress": 6,
         "processed_count": 0,
         "total_count": total_folders,
         "batch_number": 1, # to remove
@@ -101,7 +101,7 @@ def run(context: df.DurableOrchestrationContext):
 
     context.set_custom_status({
         "phase": "Finalizing Results...",
-        "progress": 95,
+        "progress": 99,
         "processed_count": total_folders,
         "total_count": total_folders
     })

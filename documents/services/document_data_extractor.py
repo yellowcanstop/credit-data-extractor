@@ -103,6 +103,7 @@ class DocumentDataExtractor:
         self.table_page_ranges: Dict[str, Tuple[int, int]] = {}
         self.di_confidence: Dict = {}
         self.di_conduct = None
+        self.di_non_zeroes = "N/A"
 
     def __safe_get_cell__(self, table, r_idx: int, c_idx: int) -> Optional[str]:
         """Safely gets and strips a cell value from a table row, returning None if the cell doesn't exist."""
@@ -170,7 +171,8 @@ class DocumentDataExtractor:
                     "layer2_triggers": metadata["layer2_fallback_fields"],
                     "validation_failures": metadata["validation_results"],
                     "flags": flags
-                }
+                },
+                "di_non_zeroes": self.di_non_zeroes
             }
 
             logger.info("Completed extraction successfully")
@@ -899,7 +901,7 @@ class DocumentDataExtractor:
                 'net_worth': ['net_worth'], 
                 'net_current_assets': ['current_assets', 'current_liabilities'],
                 'current_ratio': ['current_ratio'],
-                'gearing_ratio': ['gearing_ratio', 'debt_to_equity_ratio'],
+                'gearing_ratio': ['gearing_ratio'],
             }
 
         for field in required_fields:
@@ -915,7 +917,7 @@ class DocumentDataExtractor:
 
             # Check markdown confidence for the corresponding keys
             md_keys = field_to_md_keys.get(field, [])
-            md_values_available = md_keys and all(
+            md_values_available = md_keys and any(
                 markdown_result.get(k) is not None for k in md_keys
             ) if markdown_result else False
 
@@ -940,12 +942,11 @@ class DocumentDataExtractor:
                     logger.warning("Layer 1: Field '%s' — DI/markdown disagree or low confidence, marking for Layer 2", field)
                     fields_needing_fallback.add(field)
 
-            elif di_value is None and md_values_available and md_high_conf:
-                # DI missing but markdown has a high-confidence value — adopt markdown value
+            elif di_value is None and md_values_available:
                 logger.info("Layer 1: Field '%s' — DI missing, adopting markdown value", field)
                 self.__adopt_markdown_value__(field, markdown_result, parsed_data, extracted_data)
 
-            elif di_value is None:
+            elif di_value is None and not md_values_available:
                 # Both missing or markdown not available
                 logger.warning("Layer 1: Field '%s' — missing from both DI and markdown, marking for Layer 2", field)
                 fields_needing_fallback.add(field)
@@ -975,15 +976,14 @@ class DocumentDataExtractor:
             if field == 'utilisation':
                 md_bal = markdown_result.get('total_outstanding_balance')
                 md_limit = markdown_result.get('total_limit')
+                
                 if md_bal is not None and md_limit is not None:
-                    md_bal_norm = self.__normalize_numeric_str__(str(md_bal))
-                    md_limit_norm = self.__normalize_numeric_str__(str(md_limit))
-                    # Compare against raw extracted values from DI
                     di_bal = extracted_data.get('total_outstanding_balance_0') or extracted_data.get('total_outstanding_balance_1')
                     di_limit = extracted_data.get('total_limit_0') or extracted_data.get('total_limit_1')
+                    
                     if di_bal and di_limit:
-                        return (self.__normalize_numeric_str__(di_bal) == md_bal_norm and
-                                self.__normalize_numeric_str__(di_limit) == md_limit_norm)
+                        return (self.__normalize_numeric__(di_bal) == self.__normalize_numeric__(md_bal) and
+                                self.__normalize_numeric__(di_limit) == self.__normalize_numeric__(md_limit))
                 return False
 
             elif field == 'special_attention_accounts':
@@ -1089,18 +1089,21 @@ class DocumentDataExtractor:
                 md_key = key_map.get(field)
                 md_val = markdown_result.get(md_key)
                 if md_val is not None and di_value is not None:
-                    try:
-                        md_dec = self.__to_decimal__(str(md_val))
-                        di_dec = Decimal(str(di_value)) if not isinstance(di_value, Decimal) else di_value
-                        return abs(md_dec - di_dec) < Decimal('0.02')
-                    except (InvalidOperation, ValueError):
-                        return False
+                    # Ensure __to_decimal__ handles commas (see helper below)
+                    md_dec = self.__to_decimal__(str(md_val))
+                    di_dec = self.__to_decimal__(str(di_value))
+                    return abs(md_dec - di_dec) < Decimal('0.02')
                 return False
 
             elif field == 'financial_report_date':
                 md_fye = markdown_result.get('financial_year_end')
                 if md_fye is not None and di_value is not None:
-                    return str(di_value) == str(md_fye)
+                    # Normalize BOTH to ensure they are in the exact same string format
+                    norm_di = self.__normalize_date_robust__(str(di_value))
+                    norm_md = self.__normalize_date_robust__(str(md_fye))
+                    
+                    logger.debug(f"Comparing Dates - DI: {norm_di} vs MD: {norm_md}")
+                    return norm_di == norm_md and norm_di != ""
                 return False
 
             elif field == 'net_current_assets':
@@ -1120,6 +1123,33 @@ class DocumentDataExtractor:
             logger.warning("Comparison error for field '%s': %s", field, e)
             return False
 
+    def __normalize_date_robust__(self, date_input: str) -> str:
+        if not date_input or str(date_input).lower() in ['n/a', 'none', '']:
+            return ""
+        
+        # Clean string of common OCR noise
+        clean_date = str(date_input).strip().replace('/', '-')
+        
+        # Try multiple common formats
+        for fmt in ('%Y-%m-%d', '%d-%m-%Y', '%d-%m-%y', '%Y/%m/%d', '%d/%m/%Y'):
+            try:
+                return datetime.strptime(clean_date, fmt).strftime('%Y-%m-%d')
+            except ValueError:
+                continue
+                
+        # If all parsing fails, return the cleaned string to see if it matches raw
+        return clean_date
+    
+    def __normalize_numeric__(self, val) -> float:
+        """Removes commas and converts to float for standardized comparison."""
+        if val is None:
+            return 0.0
+        try:
+            # Remove commas and whitespace
+            clean_val = str(val).replace(',', '').strip()
+            return float(clean_val)
+        except ValueError:
+            return 0.0
 
     def __adopt_markdown_value__(self, field: str, markdown_result: Dict,
                                 parsed_data: Dict, extracted_data: Dict):
@@ -1337,7 +1367,8 @@ class DocumentDataExtractor:
                                                 di_digits, di_zeroes, di_non_zeroes)
                                     if total_non_zeroes == di_non_zeroes:
                                         logger.warning("Despite tally mismatch, non-zero count matches for ccris_conduct, which may be most indicative of repayment behavior.")
-                                    
+
+                            self.di_non_zeroes = f"{di_non_zeroes}"
                             logger.info("Document Intelligence extraction of CCRIS details prioritized due to lower hallucination risk.")
 
                 if extracted_data.get('total_outstanding_balance_1') is None and image_result.get('total_outstanding_balance') is not None:
@@ -2688,7 +2719,8 @@ class DocumentDataExtractor:
                         high_non_zeroes += 1
                     else:
                         non_zeroes -= 1
-                        digits -= 1  # invalid character, do not count
+                        digits -= 1  # invalid character, do not 
+        self.di_non_zeroes = non_zeroes
         if digits == zeroes or ((non_zeroes / digits) < 0.2 and non_zeroes == ones):
             return 'Satisfactory ( Prompt payment or occasionally lapsed 1 month )'
         elif (non_zeroes / digits) < 0.3 and non_zeroes == (ones + twos):
