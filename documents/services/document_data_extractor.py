@@ -334,7 +334,7 @@ class DocumentDataExtractor:
 
         if not fields_needing_fallback_l2:
             logger.info("All fields resolved at Layer 1")
-            return parsed_data, flags
+            return parsed_data, flags, metadata
 
         # ---- Layer 2: Markdown + Image fallback ----
         logger.info("=== Layer 2: Markdown + Image fallback for fields: %s ===", fields_needing_fallback_l2)
