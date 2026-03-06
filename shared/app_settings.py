@@ -22,4 +22,3 @@ azure_storage_account = config.get_value(
 azure_storage_queues_connection_string = config.get_value(
     "AZURE_STORAGE_QUEUES_CONNECTION_STRING", None)
 blob_account_url = config.get_value("BLOB_ACCOUNT_URL", None)
-results_container_name = config.get_value("RESULTS_CONTAINER_NAME", "parser-outputs")

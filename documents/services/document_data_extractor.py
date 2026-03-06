@@ -12,9 +12,11 @@ import io
 from typing import Dict, List, Tuple, TypeVar, Optional, Any
 from azure.ai.documentintelligence import DocumentIntelligenceClient
 from azure.ai.documentintelligence.models import AnalyzeResult, DocumentContentFormat, DocumentAnalysisFeature
+from shared import app_settings
 from shared.confidence.openai_confidence import evaluate_confidence as evaluate_confidence_openai
 from shared.confidence.document_intelligence_confidence import SearchContext, evaluate_confidence as evaluate_confidence_di
 import logging
+from azure.core.credentials import AzureKeyCredential
 
 logger = logging.getLogger(__name__)
 
@@ -2743,20 +2745,18 @@ class DocumentDataExtractor:
         return conduct_values
 
     def __get_openai_client__(self, options: DocumentDataExtractorOptions) -> AzureOpenAI:
-        token_provider = get_bearer_token_provider(
-            self.credential, "https://cognitiveservices.azure.com/.default")
-
         client = AzureOpenAI(
             api_version="2024-12-01-preview",
             azure_endpoint=options.openai_endpoint,
-            azure_ad_token_provider=token_provider)
+            api_key=app_settings.azure_openai_key
+        )
 
         return client
 
     def __get_document_intelligence_client__(self, options: DocumentDataExtractorOptions) -> DocumentIntelligenceClient:
         document_intelligence_client = DocumentIntelligenceClient(
             endpoint=options.doc_intelligence_endpoint,
-            credential=self.credential
+            credential=AzureKeyCredential(app_settings.azure_aiservices_key)
         )
 
         return document_intelligence_client
