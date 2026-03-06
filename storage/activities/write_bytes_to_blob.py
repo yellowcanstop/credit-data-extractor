@@ -5,6 +5,7 @@ This module provides the blueprint for an Azure Function activity that writes a 
 
 from __future__ import annotations
 from pydantic import Field
+from shared import app_settings
 from shared.workflows.validation_result import ValidationResult
 from storage.models.blob_storage_request import BlobStorageRequest
 from storage.services.azure_storage_client_factory import AzureStorageClientFactory
@@ -14,7 +15,7 @@ import logging
 
 name = "WriteBytesToBlob"
 bp = df.Blueprint()
-storage_factory = AzureStorageClientFactory(identity.default_credential)
+storage_factory = AzureStorageClientFactory(app_settings.blob_account_url)
 
 
 @bp.function_name(name)
