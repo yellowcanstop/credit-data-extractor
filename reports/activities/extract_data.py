@@ -18,8 +18,8 @@ from typing import Dict, Optional
 
 name = "ExtractData"
 bp = df.Blueprint()
-storage_factory = AzureStorageClientFactory(identity.default_credential)
-document_extractor = DocumentDataExtractor(identity.default_credential)
+storage_factory = AzureStorageClientFactory(app_settings.blob_account_url)
+document_extractor = DocumentDataExtractor()
 
 
 @bp.function_name(name)
@@ -39,7 +39,7 @@ def run(input: Request) -> Dict:
     blob_content = storage_factory.get_blob_content(
         app_settings.azure_storage_account, input.container_name, input.blob_name)
 
-    document_extractor = DocumentDataExtractor(identity.default_credential)
+    document_extractor = DocumentDataExtractor()
     data = document_extractor.extract_using_doc_intelligence(
         blob_content,
         DocumentDataExtractorOptions(

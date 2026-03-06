@@ -90,13 +90,11 @@ class DocumentDataExtractorOptions:
 class DocumentDataExtractor:
     """Defines a class for extracting structured data from a document using Azure OpenAI GPT models that support image inputs."""
 
-    def __init__(self, credential: DefaultAzureCredential):
+    def __init__(self):
         """Initializes a new instance of the DocumentDataExtractor class.
 
         :param credential: The Azure credential to use for authenticating with the Azure OpenAI service.
         """
-
-        self.credential = credential
         self.result: AnalyzeResult = None
         self.report_type: ReportType = None
         self.relevant_values: Dict = {}
