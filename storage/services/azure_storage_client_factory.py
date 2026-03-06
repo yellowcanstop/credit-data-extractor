@@ -1,34 +1,29 @@
 from typing import Optional
 import re
-from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient
 
 
 class AzureStorageClientFactory:
     """Defines a factory class for creating Azure Storage service client instances."""
 
-    def __init__(self, credential: DefaultAzureCredential):
+    def __init__(self, connection_string: str):
         """Initializes a new instance of the AzureStorageClientFactory class.
 
-        :param credential: The Azure credential to use for authenticating with the Azure Storage service.
+        :param connection_string: The Azure Storage connection string.
         """
+        self.connection_string = connection_string
 
-        self.credential = credential
-
-    def get_blob_service_client(self, storage_account_name: str) -> BlobServiceClient:
-        """Retrieves a `BlobServiceClient` instance for the specified Azure Storage account.
-
-        :param storage_account_name: The name of the Azure Storage account. If the account is a development storage account (i.e., devstoreaccount1 or UseDevelopmentStorage=true), the client will be created using the development storage connection string.
-        :return: A `BlobServiceClient` instance for the specified storage account.
+    def get_blob_service_client(self, storage_account_name: str = None) -> BlobServiceClient:
+        """Retrieves a `BlobServiceClient` instance using the connection string.
+        
+        Note: storage_account_name is kept for signature compatibility but ignored 
+        as the connection string contains the account details.
         """
-
-        if self.__is_development_storage_account__(storage_account_name):
+        # If you still want to support the local emulator explicitly:
+        if storage_account_name and self.__is_development_storage_account__(storage_account_name):
             return BlobServiceClient.from_connection_string("AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;DefaultEndpointsProtocol=http;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;QueueEndpoint=http://127.0.0.1:10001/devstoreaccount1;TableEndpoint=http://127.0.0.1:10002/devstoreaccount1;")
-        else:
-            return BlobServiceClient(
-                f"https://{storage_account_name}.blob.core.windows.net",
-                credential=self.credential
-            )
+        
+        return BlobServiceClient.from_connection_string(self.connection_string)
 
     def get_blob_content(self, storage_account_name: str, container_name: str, blob_name: str) -> bytes:
         """Retrieves the content of a specific blob in Azure Blob Storage as a byte array.

@@ -14,7 +14,7 @@ import logging
 
 name = "GetDocumentFolders"
 bp = df.Blueprint()
-storage_factory = AzureStorageClientFactory(identity.default_credential)
+storage_factory = AzureStorageClientFactory(app_settings.blob_account_url)
 
 
 @bp.function_name(name)
