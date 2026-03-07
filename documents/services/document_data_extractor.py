@@ -4,7 +4,6 @@ import enum
 import json
 import re
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
-from pdf2image import convert_from_bytes
 import base64
 from openai import AzureOpenAI
 from thefuzz import fuzz
@@ -17,6 +16,7 @@ from shared.confidence.openai_confidence import evaluate_confidence as evaluate_
 from shared.confidence.document_intelligence_confidence import SearchContext, evaluate_confidence as evaluate_confidence_di
 import logging
 from azure.core.credentials import AzureKeyCredential
+import fitz 
 
 logger = logging.getLogger(__name__)
 
@@ -957,6 +957,7 @@ class DocumentDataExtractor:
                     logger.warning("Layer 1: Field '%s' — DI low confidence, no markdown corroboration, marking for Layer 2", field)
                     fields_needing_fallback.add(field)
                 else:
+                    fields_needing_fallback.add(field)
                     logger.info("Layer 1: Field '%s' — DI high confidence, no markdown data, keeping DI value", field)
 
         # Handle partnership detection from markdown
@@ -2760,29 +2761,50 @@ class DocumentDataExtractor:
         return document_intelligence_client
 
     def __get_document_image_uris__(self, document_bytes: bytes, page_start: Optional[int], page_end: Optional[int]) -> list:
-        """Converts the specified document bytes to images using the pdf2image library and returns the image URIs.
-
-        To call this method, poppler-utils must be installed on the system.
         """
-
+        Converts PDF bytes to images using PyMuPDF. 
+        This library includes its own binaries, so Poppler is not required.
+        """
+        image_uris = []
+        
         try:
-            pages = convert_from_bytes(
-                document_bytes,
-                first_page=page_start,
-                last_page=page_end,
-                dpi=300
-            )
-            logger.debug("Converted PDF pages %s to %s to %d images", page_start, page_end, len(pages))
+            # Open the PDF from memory
+            doc = fitz.open(stream=document_bytes, filetype="pdf")
+            total_pages = len(doc)
+
+            # Handle 1-based indexing and None values
+            # pdf2image uses 1-based indexing for first_page/last_page
+            start_idx = (page_start - 1) if page_start is not None else 0
+            end_idx = (page_end) if page_end is not None else total_pages
+
+            # Ensure indices are within document bounds
+            start_idx = max(0, min(start_idx, total_pages - 1))
+            end_idx = max(0, min(end_idx, total_pages))
+
+            # 300 DPI Calculation: 
+            # PyMuPDF default is 72 DPI. To get 300, we need a zoom factor.
+            # zoom = 300 / 72 = 4.1666...
+            zoom = 300 / 72
+            matrix = fitz.Matrix(zoom, zoom)
+
+            for page_num in range(start_idx, end_idx):
+                page = doc.load_page(page_num)
+                
+                # Render page to a Pixmap (image)
+                pix = page.get_pixmap(matrix=matrix, colorspace=fitz.csRGB)
+                
+                # Convert Pixmap to PNG bytes
+                img_bytes = pix.tobytes("png")
+                
+                # Encode to Base64
+                base64_data = base64.b64encode(img_bytes).decode('utf-8')
+                image_uris.append(f"data:image/png;base64,{base64_data}")
+
+            doc.close()
+            logger.debug("Converted PDF pages %s to %s to %d images", page_start, page_end, len(image_uris))
+
         except Exception as e:
             logger.error("PDF to image conversion failed: %s", e, exc_info=True)
             raise ValueError(f"Failed to convert PDF to images: {e}") from e
-
-        image_uris = []
-        
-        for page in pages:
-            byteIO = io.BytesIO()
-            page.save(byteIO, format='PNG')
-            base64_data = base64.b64encode(byteIO.getvalue()).decode('utf-8')
-            image_uris.append(f"data:image/png;base64,{base64_data}")
 
         return image_uris

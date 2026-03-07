@@ -103,10 +103,6 @@ openai==1.69.0
     # via -r requirements.in
 orderedmultidict==1.0.2
     # via furl
-pdf2image==1.17.0
-    # via -r requirements.in
-pillow==12.1.0
-    # via pdf2image
 propcache==0.4.1
     # via
     #   aiohttp
@@ -119,6 +115,8 @@ pydantic-core==2.41.5
     # via pydantic
 pyjwt==2.11.0
     # via msal
+pymupdf==1.27.1
+    # via -r requirements.in
 python-dateutil==2.9.0.post0
     # via azure-functions-durable
 rapidfuzz==3.14.3
